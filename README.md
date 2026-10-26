@@ -66,6 +66,18 @@ Logs are written to `<data-dir>/rustock.log` by default (with daily rotation). U
 | `--consensus-rule RULE=HEIGHT` | rskj `regtest.conf` | Regtest: consensus-rule height (`rskip97=0`); supported: rskip92, rskip97, rskip110, rskip144 (`-1` only), rskip156, rskipUMM, rskip351, rskip535. Repeatable |
 | `--skip-pow-validation` | `false` | Regtest: do not check merged-mining proof of work (rskj `miner.server.skipPowValidation`) |
 
+### Importing blocks
+
+`import-blocks` replays a file of blocks exported by rskj's `ExportBlocks` tool (`number,hash,totalDifficulty,rlp` per line, plain or gzip) into an empty data directory. Each block goes through the same validation and execution as sync, and must become the new best block; the first block that fails stops the import with exit status 1 and names the failed check.
+
+```bash
+rustock-cli import-blocks --file blocks.txt.gz --datadir ./import \
+  --genesis genesis.json --consensus-rule rskip144=-1 --consensus-rule rskip97=0 \
+  --skip-pow-validation --flush-every 10
+```
+
+The trie store is flushed every `--flush-every` blocks (default 10, like rskj's `blockchain.flushNumberOfBlocks` setting in a lab replay) and at the end.
+
 ### Testing
 
 ```bash
