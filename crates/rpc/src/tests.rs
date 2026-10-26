@@ -18,6 +18,7 @@ fn test_header(number: u64) -> Header {
         receipts_root: B256::ZERO,
         logs_bloom: Bloom::ZERO,
         extension_data: None,
+        header_extension: None,
         difficulty: U256::from(1000),
         number,
         gas_limit: U256::from(8_000_000),

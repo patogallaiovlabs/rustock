@@ -61,6 +61,10 @@ Logs are written to `<data-dir>/rustock.log` by default (with daily rotation). U
 | `--rpc-host` | `127.0.0.1` | JSON-RPC bind address |
 | `--no-rpc` | `false` | Disable the JSON-RPC server |
 | `--external-ip` | none | External IP to advertise in discovery (e.g. `203.0.113.42`) |
+| `--genesis` | none | Regtest: rskj genesis JSON file (rskj's `genesis` setting) |
+| `--hardfork NAME=HEIGHT` | rskj `regtest.conf` | Regtest: network-upgrade height, rskj names (`lovell700=0`); `-1` disables. Repeatable |
+| `--consensus-rule RULE=HEIGHT` | rskj `regtest.conf` | Regtest: consensus-rule height (`rskip97=0`); supported: rskip92, rskip97, rskip110, rskip144 (`-1` only), rskip156, rskipUMM, rskip351, rskip535. Repeatable |
+| `--skip-pow-validation` | `false` | Regtest: do not check merged-mining proof of work (rskj `miner.server.skipPowValidation`) |
 
 ### Testing
 

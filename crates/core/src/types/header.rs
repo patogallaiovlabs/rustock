@@ -15,6 +15,10 @@ pub struct Header {
     /// Compressed extension data (RSKIP-351 V1/V2). When present, `logs_bloom`
     /// is set to default and this field contains `RLP([version, hash])`.
     pub extension_data: Option<Bytes>,
+    /// RSKIP351 header extension of a v1/v2 header decoded from its full
+    /// encoding (as stored by rskj and exported by its ExportBlocks tool).
+    /// `None` for v0 headers and for headers received in compressed form.
+    pub header_extension: Option<HeaderExtension>,
     pub difficulty: U256,
     pub number: u64,
     pub gas_limit: U256,
@@ -47,6 +51,67 @@ pub struct Header {
     pub cached_hash_for_merged_mining: Option<B256>,
 }
 
+/// The version-specific part of an RSKIP351 block header (rskj
+/// `BlockHeaderV1` / `BlockHeaderV2`). In the full encoding the logs bloom
+/// stays in field 6 and these fields follow the UMM root; in the encoding used
+/// for the block hash, field 6 is replaced by
+/// `RLP([version, keccak256(RLP([keccak256(logsBloom), baseEvent?]))])` and
+/// these fields are omitted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeaderExtension {
+    /// Header version: 1 (RSKIP351) or 2 (RSKIP535).
+    pub version: u8,
+    /// RSKIP535 `baseEvent` (v2 only; empty when the block carries none).
+    pub base_event: Option<Bytes>,
+}
+
+/// Network-upgrade heights that change how a header is laid out on the wire.
+/// rskj `BlockFactory.decodeHeader` reads them from its `ActivationConfig`.
+#[derive(Clone, Copy, Debug)]
+pub struct HeaderLayout {
+    /// RSKIP92 (orchid): block hashes leave out the merkle proof and coinbase.
+    pub rskip92: u64,
+    /// RSKIPUMM: the `ummRoot` field follows `uncleCount`.
+    pub rskip_umm: u64,
+    /// RSKIP351: versioned headers (v1).
+    pub rskip351: u64,
+    /// RSKIP535: v2 headers with a `baseEvent` field.
+    pub rskip535: u64,
+    /// RSKIP144: parallel-execution sublist edges (not supported).
+    pub rskip144: u64,
+}
+
+impl HeaderLayout {
+    /// The layout given by the process-wide activation heights.
+    pub fn current() -> Self {
+        let a = crate::config::ActivationHeights::current();
+        Self {
+            rskip92: a.orchid,
+            rskip_umm: a.rskip_umm,
+            rskip351: a.rskip351,
+            rskip535: a.rskip535,
+            rskip144: a.rskip144,
+        }
+    }
+}
+
+/// Number of complete RLP items in `buf`.
+fn count_rlp_items(buf: &[u8]) -> usize {
+    let mut count = 0usize;
+    let mut rest = buf;
+    while !rest.is_empty() {
+        let mut temp = rest;
+        match alloy_rlp::Header::decode(&mut temp) {
+            Ok(h) if h.payload_length <= temp.len() => {
+                rest = &temp[h.payload_length..];
+                count += 1;
+            }
+            _ => break,
+        }
+    }
+    count
+}
+
 /// `BigInteger.toByteArray()` for a non-negative value: zero is the single
 /// byte 0x00, and values whose top bit is set get a 0x00 sign prefix. rskj
 /// encodes difficulty (`RLP.encodeBlockDifficulty`), gasLimit (raw bytes it
@@ -71,6 +136,20 @@ impl Header {
     /// list payload of all header fields; the merkle proof and coinbase tx
     /// are excluded from RSKIP92 block hashes but kept on the wire.
     fn encode_payload(&self, with_merkle_proof_and_coinbase: bool) -> Vec<u8> {
+        self.encode_fields(false, true, with_merkle_proof_and_coinbase)
+    }
+
+    /// rskj `BlockHeader.getEncoded(withMergedMiningFields,
+    /// withMerkleProofAndCoinbase, compressed)`. `compressed` only differs from
+    /// the full encoding for RSKIP351 headers (`header_extension` set): field 6
+    /// carries the extension data instead of the logs bloom, and the version
+    /// and baseEvent fields are left out.
+    fn encode_fields(
+        &self,
+        compressed: bool,
+        with_merged_mining_fields: bool,
+        with_merkle_proof_and_coinbase: bool,
+    ) -> Vec<u8> {
         let mut list = Vec::new();
         self.parent_hash.encode(&mut list);
         self.ommers_hash.encode(&mut list);
@@ -78,7 +157,13 @@ impl Header {
         self.state_root.encode(&mut list);
         self.transactions_root.encode(&mut list);
         self.receipts_root.encode(&mut list);
-        self.logs_bloom.encode(&mut list);
+        match (&self.header_extension, compressed) {
+            (Some(ext), true) => self
+                .compressed_extension_data(ext)
+                .as_slice()
+                .encode(&mut list),
+            _ => self.logs_bloom.encode(&mut list),
+        }
         java_signed_bytes(&self.difficulty).as_slice().encode(&mut list);
         self.number.encode(&mut list);
         java_signed_bytes(&self.gas_limit).as_slice().encode(&mut list);
@@ -91,6 +176,17 @@ impl Header {
 
         if let Some(umm) = &self.umm_root {
             umm.encode(&mut list);
+        }
+        // rskj BlockHeaderV1/V2.addExtraFieldsToEncodedHeader: the full
+        // encoding carries the version byte and (v2) the baseEvent.
+        if let (Some(ext), false) = (&self.header_extension, compressed) {
+            ext.version.encode(&mut list);
+            if let Some(base_event) = &ext.base_event {
+                base_event.encode(&mut list);
+            }
+        }
+        if !with_merged_mining_fields {
+            return list;
         }
         // rskj emits the merkle proof and coinbase tx whenever the mining
         // header is present — as empty elements if need be — rather than
@@ -110,6 +206,75 @@ impl Header {
         }
         list
     }
+
+    /// rskj `BlockHeaderV1.createExtensionData` / `BlockHeaderV2.createExtensionData`:
+    /// `RLP([version, keccak256(RLP([keccak256(logsBloom), baseEvent?]))])`
+    /// (`BlockHeaderExtensionV1.getEncodedForHash`, extended by v2 with the
+    /// baseEvent).
+    fn compressed_extension_data(&self, ext: &HeaderExtension) -> Vec<u8> {
+        let mut inner = Vec::new();
+        alloy_primitives::keccak256(self.logs_bloom.as_slice()).encode(&mut inner);
+        if ext.version >= 2 {
+            ext.base_event
+                .clone()
+                .unwrap_or_default()
+                .encode(&mut inner);
+        }
+        let mut inner_list = Vec::new();
+        alloy_rlp::Header {
+            list: true,
+            payload_length: inner.len(),
+        }
+        .encode(&mut inner_list);
+        inner_list.extend_from_slice(&inner);
+        let extension_hash = alloy_primitives::keccak256(&inner_list);
+
+        let mut fields = Vec::new();
+        ext.version.encode(&mut fields);
+        extension_hash.encode(&mut fields);
+        let mut out = Vec::new();
+        alloy_rlp::Header {
+            list: true,
+            payload_length: fields.len(),
+        }
+        .encode(&mut out);
+        out.extend_from_slice(&fields);
+        out
+    }
+
+    /// rskj `BlockHeader.getEncodedForHash` of an RSKIP351 header: the
+    /// compressed encoding.
+    fn compressed_hash(&self, rskip92_active: bool) -> B256 {
+        Self::keccak_list(&self.encode_fields(true, true, !rskip92_active))
+    }
+
+    /// Keccak256 of an RLP list with the given payload.
+    fn keccak_list(payload: &[u8]) -> B256 {
+        let mut buf = Vec::with_capacity(payload.len() + 4);
+        alloy_rlp::Header {
+            list: true,
+            payload_length: payload.len(),
+        }
+        .encode(&mut buf);
+        buf.extend_from_slice(payload);
+        alloy_primitives::keccak256(&buf)
+    }
+
+    /// rskj `BlockHeader.getBaseHashForMergedMining` for RSKIP351 headers:
+    /// the compressed encoding without merged-mining fields, double-hashed
+    /// with the UMM root when it is not empty.
+    fn extension_hash_for_merged_mining(&self) -> B256 {
+        let base = Self::keccak_list(&self.encode_fields(true, false, false));
+        match &self.umm_root {
+            Some(umm) if !umm.is_empty() => {
+                let mut input = Vec::with_capacity(20 + umm.len());
+                input.extend_from_slice(&base.as_slice()[..20]);
+                input.extend_from_slice(umm.as_ref());
+                alloy_primitives::keccak256(&input)
+            }
+            _ => base,
+        }
+    }
 }
 
 impl Encodable for Header {
@@ -128,6 +293,15 @@ impl Encodable for Header {
 
 impl alloy_rlp::Decodable for Header {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        Self::decode_with_layout(buf, HeaderLayout::current())
+    }
+}
+
+impl Header {
+    /// Decode a header whose optional fields follow the given activation
+    /// heights (the process-wide ones for `Decodable::decode`).
+    pub fn decode_with_layout(buf: &mut &[u8], layout: HeaderLayout) -> alloy_rlp::Result<Self> {
+        use alloy_rlp::Decodable;
         let h = alloy_rlp::Header::decode(buf)?;
         if !h.list { return Err(alloy_rlp::Error::UnexpectedString); }
         let mut body = &buf[..h.payload_length];
@@ -168,6 +342,7 @@ impl alloy_rlp::Decodable for Header {
             receipts_root,
             logs_bloom,
             extension_data,
+            header_extension: None,
             difficulty: decode_u256_lenient(&mut body)?,
             number: decode_u64_lenient(&mut body)?,
             gas_limit: decode_u256_lenient(&mut body)?,
@@ -184,6 +359,14 @@ impl alloy_rlp::Decodable for Header {
             cached_hash: None,
             cached_hash_for_merged_mining: None,
         };
+
+        // RSKIP351 header in its full encoding: the logs bloom is in field 6
+        // and the version (and, for v2, the baseEvent) follow the UMM root
+        // (rskj BlockFactory.decodeHeader).
+        if header.extension_data.is_none() && header.number >= layout.rskip351 {
+            header.decode_versioned_tail(body, &layout)?;
+            return Ok(header);
+        }
 
         // Count remaining RLP items to distinguish header format:
         //   3 items → V0: btc_header, btc_merkle_proof, btc_coinbase_tx
@@ -220,6 +403,59 @@ impl alloy_rlp::Decodable for Header {
         
         Ok(header)
     }
+
+    /// The fields after `uncleCount` of a full-encoded RSKIP351 header, in
+    /// rskj `BlockFactory.decodeHeader` order: ummRoot (RSKIPUMM), version,
+    /// baseEvent (RSKIP535), then the three merged-mining fields if present.
+    fn decode_versioned_tail(
+        &mut self,
+        mut body: &[u8],
+        layout: &HeaderLayout,
+    ) -> alloy_rlp::Result<()> {
+        use alloy_rlp::Decodable;
+        const MINING_FIELDS: usize = 3;
+        if self.number >= layout.rskip144 {
+            return Err(alloy_rlp::Error::Custom(
+                "RSKIP144 headers (parallel execution sublists) are not supported",
+            ));
+        }
+        if self.number >= layout.rskip_umm {
+            self.umm_root = Some(Bytes::decode(&mut body)?);
+        }
+        let version = Bytes::decode(&mut body)?;
+        let version = match version.as_ref() {
+            [v @ (1 | 2)] => *v,
+            _ => return Err(alloy_rlp::Error::Custom("unknown RSKIP351 header version")),
+        };
+        let mut base_event = None;
+        if self.number >= layout.rskip535 {
+            // rskj: an absent baseEvent (nothing or only the mining fields
+            // left) decodes as an empty one.
+            let remaining = count_rlp_items(body);
+            base_event = Some(if remaining == 0 || remaining == MINING_FIELDS {
+                Bytes::new()
+            } else {
+                Bytes::decode(&mut body)?
+            });
+        }
+        if !body.is_empty() {
+            self.bitcoin_merged_mining_header = Some(Bytes::decode(&mut body)?);
+            self.bitcoin_merged_mining_merkle_proof = Some(Bytes::decode(&mut body)?);
+            self.bitcoin_merged_mining_coinbase_transaction = Some(Bytes::decode(&mut body)?);
+        }
+        if !body.is_empty() {
+            return Err(alloy_rlp::Error::Custom(
+                "unexpected trailing header fields",
+            ));
+        }
+        // rskj builds a BlockHeaderV1 (no baseEvent) for version 1.
+        let base_event = if version >= 2 { base_event } else { None };
+        self.header_extension = Some(HeaderExtension {
+            version,
+            base_event,
+        });
+        Ok(())
+    }
 }
 
 impl Header {
@@ -233,6 +469,9 @@ impl Header {
     pub fn hash(&self) -> B256 {
         if let Some(h) = self.cached_hash {
             return h;
+        }
+        if self.header_extension.is_some() {
+            return self.compressed_hash(self.rskip92_active());
         }
         let payload = self.encode_payload(!self.rskip92_active());
         let mut buffer = Vec::with_capacity(payload.len() + 4);
@@ -271,9 +510,24 @@ impl Header {
     /// Decode a header from RLP bytes and compute the hash from those original
     /// bytes (before our re-encoding potentially changes them).
     pub fn decode_with_hash(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        use alloy_rlp::Decodable;
+        Self::decode_with_hash_and_layout(buf, HeaderLayout::current())
+    }
+
+    /// [`Header::decode_with_hash`] with explicit activation heights.
+    pub fn decode_with_hash_and_layout(
+        buf: &mut &[u8],
+        layout: HeaderLayout,
+    ) -> alloy_rlp::Result<Self> {
         let original = *buf;
-        let mut header = <Self as Decodable>::decode(buf)?;
+        let mut header = Self::decode_with_layout(buf, layout)?;
+        if header.header_extension.is_some() {
+            // RSKIP351: both hashes cover the compressed encoding, which the
+            // full encoding's bytes do not contain; every field is re-encoded
+            // with rskj's (BigInteger) semantics.
+            header.cached_hash = Some(header.compressed_hash(header.number >= layout.rskip92));
+            header.cached_hash_for_merged_mining = Some(header.extension_hash_for_merged_mining());
+            return Ok(header);
+        }
         let consumed = original.len() - buf.len();
         let has_proof_and_coinbase = header.bitcoin_merged_mining_merkle_proof.is_some()
             || header.bitcoin_merged_mining_coinbase_transaction.is_some();
@@ -366,6 +620,9 @@ impl Header {
         if let Some(h) = self.cached_hash_for_merged_mining {
             return h;
         }
+        if self.header_extension.is_some() {
+            return self.extension_hash_for_merged_mining();
+        }
 
         let has_umm_root = self.umm_root.is_some();
         let is_umm_block = self.umm_root.as_ref().is_some_and(|u| !u.is_empty());
@@ -434,6 +691,7 @@ mod tests {
             receipts_root: B256::repeat_byte(0x66),
             logs_bloom: Bloom::repeat_byte(0x77),
             extension_data: None,
+            header_extension: None,
             difficulty: U256::from(1234567),
             number: 42,
             gas_limit: U256::from(10_000_000),
@@ -500,6 +758,7 @@ mod tests {
             receipts_root: b256!("a70fc9a7d692ac80a46b23dcf81d5928dbdebc8ac097cfdbce2c03301d9e9406"),
             logs_bloom: Bloom::ZERO,
             extension_data: None,
+            header_extension: None,
             difficulty: U256::from(0xa406a0050938ca1a7_u128),
             number: 729_024,
             gas_limit: U256::from(0x67c280),
@@ -583,6 +842,7 @@ mod tests {
             receipts_root: "0x10494928db1d75522b131648096f37c5982db7ac4da9f0ab0d9820efafa3ecec".parse().unwrap(),
             logs_bloom: Bloom::ZERO,
             extension_data: None,
+            header_extension: None,
             difficulty: U256::from(0x1ef082d0eba72au64),
             number: 0xd43,
             gas_limit: U256::from(0x4c4b40),
@@ -615,5 +875,104 @@ mod tests {
         let expected_sha3_uncles: B256 =
             "0xed488b69222610bae4c438b50d2472019e3efed77c654771025775d19d2ec648".parse().unwrap();
         assert_eq!(keccak256(&uncles_list), expected_sha3_uncles, "block #3397 sha3Uncles");
+    }
+
+    /// Header of block 2 of an rskj regtest chain (rskj regtest.conf:
+    /// rskipUMM = rskip351 = rskip535 = 1), in rskj's full encoding as
+    /// written by its ExportBlocks tool: logs bloom in field 6, then ummRoot,
+    /// version 2 and an empty baseEvent before the merged-mining fields.
+    const RSKJ_REGTEST_V2_HEADER: &str = concat!(
+        "f902afa05cfa07262772ed427ae792a1af0d3ab4f096ac75b8d64cffafcb9cf63c6a3d78a01dcc4d",
+        "e8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d4934794916d3652976d82540412",
+        "b561bf674f72cf5174f7a0e4e42cc2f729c8eba5c681bf94d3894973060c4590cd369b471f9de8f4",
+        "f3b91ca05bf011c2c3c22311859c82cd34d6311854b8a0422056bb00f27846d733b277e4a05b000f",
+        "7bf562eb5d6d6703caedc1686431974552403ff285a82b8c8850c4d76db901000000000000000000",
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "0000000000000000840ffc00400284017d784083065b9a846ad918ff95d40192534e415053484f54",
+        "2d333932616535353036800080800280b85071110100000000000000000000000000000000000000",
+        "000000000000000000000000000086959f5b0d47d3a647b3f43188d294a9f818ff1b534d274dee68",
+        "f77f5fdacdb40819d96affff7f210000000080b86d00000000000000c074985a5443872ae31d04bd",
+        "b6df32652861cc522f9b2515e61f13e6321c4289b9d2b733896ef538d9c2c0ba8e3ebacb7d8f099f",
+        "114be9eb6552534b424c4f434b3a572685b4d61607ddda0c0f78f8dfb98d2c817cda2cdeb7a2ab4c",
+        "74db003ceb7300000000",
+    );
+    const RSKJ_REGTEST_V2_HASH: B256 =
+        b256!("fce72de0a4a72d13328f3c12fef0a6bce0a7e2955e7e0ad1829e8b4d352210a7");
+
+    fn regtest_layout() -> HeaderLayout {
+        HeaderLayout {
+            rskip92: 0,
+            rskip_umm: 1,
+            rskip351: 1,
+            rskip535: 1,
+            rskip144: u64::MAX,
+        }
+    }
+
+    #[test]
+    fn rskip351_v2_header_decodes_and_hashes_like_rskj() {
+        let raw = hex::decode(RSKJ_REGTEST_V2_HEADER).unwrap();
+        let header =
+            Header::decode_with_hash_and_layout(&mut raw.as_slice(), regtest_layout()).unwrap();
+        assert_eq!(header.number, 2);
+        assert_eq!(header.umm_root, Some(Bytes::new()));
+        assert_eq!(
+            header.header_extension,
+            Some(HeaderExtension {
+                version: 2,
+                base_event: Some(Bytes::new())
+            })
+        );
+        assert_eq!(
+            header
+                .bitcoin_merged_mining_header
+                .as_ref()
+                .map(|b| b.len()),
+            Some(80)
+        );
+        assert_eq!(header.hash(), RSKJ_REGTEST_V2_HASH);
+
+        // Re-encoding gives back rskj's full encoding, and a header read back
+        // from it (as from the block store, no cached hash) has the same hash.
+        let mut encoded = Vec::new();
+        header.encode(&mut encoded);
+        assert_eq!(encoded, raw);
+        let mut reread =
+            Header::decode_with_layout(&mut encoded.as_slice(), regtest_layout()).unwrap();
+        reread.cached_hash = None;
+        assert_eq!(reread.compressed_hash(true), RSKJ_REGTEST_V2_HASH);
+        assert_eq!(
+            reread.hash_for_merged_mining(),
+            header.hash_for_merged_mining()
+        );
+    }
+
+    #[test]
+    fn rskip351_layout_off_keeps_the_legacy_decoder() {
+        // Without RSKIP351 the same bytes go through the pre-existing
+        // item-count decoder: no extension, so a different (wrong) hash.
+        let raw = hex::decode(RSKJ_REGTEST_V2_HEADER).unwrap();
+        let layout = HeaderLayout {
+            rskip351: u64::MAX,
+            ..regtest_layout()
+        };
+        let header = Header::decode_with_hash_and_layout(&mut raw.as_slice(), layout).unwrap();
+        assert!(header.header_extension.is_none());
+        assert_ne!(header.hash(), RSKJ_REGTEST_V2_HASH);
+    }
+
+    #[test]
+    fn rskip144_headers_are_rejected() {
+        let raw = hex::decode(RSKJ_REGTEST_V2_HEADER).unwrap();
+        let layout = HeaderLayout {
+            rskip144: 0,
+            ..regtest_layout()
+        };
+        assert!(Header::decode_with_layout(&mut raw.as_slice(), layout).is_err());
     }
 }

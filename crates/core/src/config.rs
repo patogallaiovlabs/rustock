@@ -28,6 +28,18 @@ pub struct ActivationHeights {
     pub wasabi100: u64,
     /// Papyrus200 hardfork – enables RSKIP156 (difficulty divisor 50 -> 400).
     pub papyrus200: u64,
+    /// RSKIP97: no reset to the minimum difficulty after a 10-minute gap
+    /// (orchid in rskj reference.conf; regtest.conf disables it).
+    pub rskip97: u64,
+    /// RSKIPUMM: headers carry the `ummRoot` field (papyrus200).
+    pub rskip_umm: u64,
+    /// RSKIP144: parallel transaction execution (reed810). rustock does not
+    /// implement it; any finite height is rejected by the regtest loader.
+    pub rskip144: u64,
+    /// RSKIP351: versioned block headers (reed810).
+    pub rskip351: u64,
+    /// RSKIP535: v2 block headers with a `baseEvent` (not on mainnet).
+    pub rskip535: u64,
 }
 
 /// Process-wide activation heights, consulted by block-hash computation
@@ -52,6 +64,12 @@ impl ActivationHeights {
             orchid: 729_000,
             wasabi100: 1_591_000,
             papyrus200: 2_392_700,
+            rskip97: 729_000,
+            rskip_umm: 2_392_700,
+            // reed810 = -1 and rskip535 = -1 on mainnet (rskj main.conf).
+            rskip144: u64::MAX,
+            rskip351: u64::MAX,
+            rskip535: u64::MAX,
         }
     }
 
@@ -60,15 +78,23 @@ impl ActivationHeights {
             orchid: 0,
             wasabi100: 0,
             papyrus200: 0,
+            // Same boundaries as before these fields existed: RSKIP97 follows
+            // orchid and RSKIP351 headers are not decoded on testnet.
+            rskip97: 0,
+            rskip_umm: 0,
+            rskip144: u64::MAX,
+            rskip351: u64::MAX,
+            rskip535: u64::MAX,
         }
     }
 
+    /// rskj regtest.conf: every network upgrade at genesis, plus its
+    /// `consensusRules` (rskip97 = -1, rskipUMM = 1, rskip144 = -1,
+    /// rskip351 = 1, rskip535 = 1).
     pub fn regtest() -> Self {
-        Self {
-            orchid: 0,
-            wasabi100: 0,
-            papyrus200: u64::MAX,
-        }
+        crate::rskj_config::RskjActivations::regtest()
+            .activation_heights()
+            .expect("rskj regtest.conf defaults are supported")
     }
 }
 
@@ -84,6 +110,16 @@ pub struct ChainConfig {
     pub min_gas_limit: u64,
     pub max_gas_limit: u64,
     pub activation_heights: ActivationHeights,
+    /// rskj network-upgrade heights this chain was configured from, when it
+    /// was (regtest). Execution derives its upgrade ladder from the same
+    /// table, so header rules and execution rules agree.
+    pub rskj_activations: Option<crate::rskj_config::RskjActivations>,
+    /// Genesis loaded from an rskj genesis JSON file (regtest only).
+    pub genesis_spec: Option<crate::rskj_config::GenesisSpec>,
+    /// Accept headers without checking their merged-mining proof of work,
+    /// like rskj with `miner.server.skipPowValidation = true` (used by
+    /// regtest chains mined without real PoW). Off by default.
+    pub skip_pow_validation: bool,
 }
 
 impl ChainConfig {
@@ -99,6 +135,9 @@ impl ChainConfig {
             min_gas_limit: 5000,
             max_gas_limit: 1_000_000_000,
             activation_heights: ActivationHeights::mainnet(),
+            rskj_activations: None,
+            genesis_spec: None,
+            skip_pow_validation: false,
         }
     }
 
@@ -114,11 +153,29 @@ impl ChainConfig {
             min_gas_limit: 5000,
             max_gas_limit: 1_000_000_000,
             activation_heights: ActivationHeights::testnet(),
+            rskj_activations: None,
+            genesis_spec: None,
+            skip_pow_validation: false,
         }
     }
 
     pub fn regtest() -> Self {
-        Self {
+        Self::regtest_with(crate::rskj_config::RskjActivations::regtest(), None)
+            .expect("rskj regtest.conf defaults are supported")
+    }
+
+    /// Regtest with the given rskj activation heights and, optionally, a
+    /// genesis loaded from an rskj genesis JSON file.
+    pub fn regtest_with(
+        activations: crate::rskj_config::RskjActivations,
+        mut genesis_spec: Option<crate::rskj_config::GenesisSpec>,
+    ) -> anyhow::Result<Self> {
+        let activation_heights = activations.activation_heights()?;
+        if let Some(spec) = genesis_spec.as_mut() {
+            // rskj GenesisLoaderImpl: useRskip92Encoding = RSKIP92 active at 0.
+            spec.use_rskip92_encoding = activation_heights.orchid == 0;
+        }
+        Ok(Self {
             chain_id: 33,
             network_id: 7771,
             duration_limit: 10,
@@ -126,10 +183,16 @@ impl ChainConfig {
             min_difficulty: U256::from(1),
             max_future_block_time: 0,
             gas_limit_bound_divisor: 1024,
-            min_gas_limit: 1,
-            max_gas_limit: 10_000_000,
-            activation_heights: ActivationHeights::regtest(),
-        }
+            // rskj has a single lower bound (Constants.getMinGasLimit,
+            // GasLimitRule) and no upper bound; BlockParentGasLimitRule keeps
+            // each block within 1/1024 of its parent.
+            min_gas_limit: 3_000_000,
+            max_gas_limit: u64::MAX,
+            activation_heights,
+            rskj_activations: Some(activations),
+            genesis_spec,
+            skip_pow_validation: false,
+        })
     }
 
     /// Returns the well-known genesis hash for this network, if one exists.
@@ -137,6 +200,11 @@ impl ChainConfig {
     /// of the genesis difficulty includes a leading zero byte that differs
     /// from standard encoding, producing a different hash.
     pub fn known_genesis_hash(&self) -> Option<B256> {
+        if let Some(spec) = &self.genesis_spec {
+            // rskj encodes the genesis difficulty with the JSON file's exact
+            // bytes, so the hash cannot be recomputed from the header.
+            return spec.state_root.map(|_| spec.hash());
+        }
         match self.chain_id {
             30 => Some("0xf88529d4ab262c0f4d042e9d8d3f2472848eaafe1a9b7213f57617eb40a9f9e0".parse().unwrap()),
             31 => Some("0xcabb7fbe88cd6d922042a32ffc08ce8b1fbb37d650b9d4e7dbfe2a7469adfa42".parse().unwrap()),
@@ -149,6 +217,10 @@ impl ChainConfig {
         let empty_list_hash: B256 = "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347".parse().unwrap();
         let empty_trie_hash: B256 = "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421".parse().unwrap();
 
+        if let Some(spec) = &self.genesis_spec {
+            return spec.header();
+        }
+
         match self.chain_id {
             30 => Header {
                 parent_hash: B256::ZERO,
@@ -159,6 +231,7 @@ impl ChainConfig {
                 receipts_root: empty_trie_hash,
                 logs_bloom: Default::default(),
                 extension_data: None,
+                header_extension: None,
                 difficulty: U256::from(0x00100000),
                 number: 0,
                 gas_limit: U256::from(0x67c280),
@@ -184,6 +257,7 @@ impl ChainConfig {
                 receipts_root: B256::ZERO,
                 logs_bloom: Default::default(),
                 extension_data: None,
+                header_extension: None,
                 difficulty: U256::from(0x00100000),
                 number: 0,
                 gas_limit: U256::from(0x4c4b40),
@@ -209,6 +283,7 @@ impl ChainConfig {
                 receipts_root: B256::ZERO,
                 logs_bloom: Default::default(),
                 extension_data: None,
+                header_extension: None,
                 difficulty: U256::from(0x20000),
                 number: 0,
                 gas_limit: U256::from(10_000_000),
@@ -326,10 +401,11 @@ mod tests {
 
     #[test]
     fn test_regtest_activation_heights() {
+        // rskj regtest.conf: every network upgrade at genesis.
         let heights = ActivationHeights::regtest();
         assert_eq!(heights.orchid, 0);
         assert_eq!(heights.wasabi100, 0);
-        assert_eq!(heights.papyrus200, u64::MAX);
+        assert_eq!(heights.papyrus200, 0);
     }
 
     #[test]

@@ -13,6 +13,7 @@ fn dummy_header(number: u64, parent: B256, difficulty: U256) -> Header {
         receipts_root: B256::ZERO,
         logs_bloom: Default::default(),
         extension_data: None,
+        header_extension: None,
         difficulty,
         gas_limit: U256::from(8_000_000),
         gas_used: 0,

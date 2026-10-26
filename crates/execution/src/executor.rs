@@ -57,7 +57,14 @@ pub struct RskExecutor {
 
 impl RskExecutor {
     pub fn new(hardfork_cfg: RskHardforkConfig, block_store: Arc<BlockStore>) -> Self {
-        let remasc_config = crate::remasc::RemascConfig::mainnet();
+        // rskj remasc.json: regtest has its own constants (maturity 10,
+        // synthetic span 5, its own RSK Labs address).
+        let remasc_config = match hardfork_cfg.chain_id {
+            crate::hardfork::RSK_MAINNET_CHAIN_ID | crate::hardfork::RSK_TESTNET_CHAIN_ID => {
+                crate::remasc::RemascConfig::mainnet()
+            }
+            _ => crate::remasc::RemascConfig::regtest(),
+        };
         let bridge_constants = match hardfork_cfg.chain_id {
             crate::hardfork::RSK_TESTNET_CHAIN_ID => crate::bridge::constants::BridgeConstants::testnet(),
             crate::hardfork::RSK_MAINNET_CHAIN_ID => crate::bridge::constants::BridgeConstants::mainnet(),
@@ -789,6 +796,7 @@ mod tests {
             receipts_root: B256::ZERO,
             logs_bloom: Bloom::ZERO,
             extension_data: None,
+            header_extension: None,
             difficulty: U256::from(1_000_000),
             number,
             gas_limit: U256::from(6_800_000),

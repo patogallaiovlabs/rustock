@@ -2951,6 +2951,7 @@ dependencies = [
  "ripemd",
  "rustock-trie",
  "serde",
+ "serde_json",
  "sha2",
  "sha3",
  "thiserror",

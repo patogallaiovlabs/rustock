@@ -36,6 +36,7 @@ mod tests {
             receipts_root: B256::repeat_byte(6),
             logs_bloom: Default::default(),
             extension_data: None,
+            header_extension: None,
             difficulty: U256::from(100),
             number: 1_000,
             gas_limit: U256::from(10_000_000),
