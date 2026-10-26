@@ -154,6 +154,11 @@ struct ChainArgs {
     /// rskip351, rskip535.
     #[arg(long = "consensus-rule", value_name = "RULE=HEIGHT")]
     consensus_rules: Vec<String>,
+
+    /// Do not check the merged-mining proof of work of block headers, like
+    /// rskj's `miner.server.skipPowValidation = true`. Regtest only.
+    #[arg(long, default_value_t = false)]
+    skip_pow_validation: bool,
 }
 
 impl ChainArgs {
@@ -164,10 +169,13 @@ impl ChainArgs {
         };
         let customized = self.genesis.is_some()
             || !self.hardforks.is_empty()
-            || !self.consensus_rules.is_empty();
+            || !self.consensus_rules.is_empty()
+            || self.skip_pow_validation;
         match network_id {
             30 | 31 if customized => {
-                anyhow::bail!("--genesis, --hardfork and --consensus-rule are regtest-only")
+                anyhow::bail!(
+                    "--genesis, --hardfork, --consensus-rule and --skip-pow-validation are regtest-only"
+                )
             }
             30 => return Ok(ChainConfig::mainnet()),
             31 => return Ok(ChainConfig::testnet()),
@@ -197,7 +205,9 @@ impl ChainArgs {
             .as_deref()
             .map(GenesisSpec::from_file)
             .transpose()?;
-        ChainConfig::regtest_with(activations, genesis)
+        let mut config = ChainConfig::regtest_with(activations, genesis)?;
+        config.skip_pow_validation = self.skip_pow_validation;
+        Ok(config)
     }
 }
 

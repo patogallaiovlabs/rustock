@@ -116,6 +116,10 @@ pub struct ChainConfig {
     pub rskj_activations: Option<crate::rskj_config::RskjActivations>,
     /// Genesis loaded from an rskj genesis JSON file (regtest only).
     pub genesis_spec: Option<crate::rskj_config::GenesisSpec>,
+    /// Accept headers without checking their merged-mining proof of work,
+    /// like rskj with `miner.server.skipPowValidation = true` (used by
+    /// regtest chains mined without real PoW). Off by default.
+    pub skip_pow_validation: bool,
 }
 
 impl ChainConfig {
@@ -133,6 +137,7 @@ impl ChainConfig {
             activation_heights: ActivationHeights::mainnet(),
             rskj_activations: None,
             genesis_spec: None,
+            skip_pow_validation: false,
         }
     }
 
@@ -150,6 +155,7 @@ impl ChainConfig {
             activation_heights: ActivationHeights::testnet(),
             rskj_activations: None,
             genesis_spec: None,
+            skip_pow_validation: false,
         }
     }
 
@@ -185,6 +191,7 @@ impl ChainConfig {
             activation_heights,
             rskj_activations: Some(activations),
             genesis_spec,
+            skip_pow_validation: false,
         })
     }
 

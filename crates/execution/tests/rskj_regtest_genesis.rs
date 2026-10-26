@@ -14,7 +14,10 @@ use rustock_trie::MemoryTrieStore;
 
 #[test]
 fn rskj_regtest_genesis_hash() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/rskj-regtest-genesis.json");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/rskj-regtest-genesis.json"
+    );
     let spec = GenesisSpec::from_file(std::path::Path::new(path)).unwrap();
     let mut config = ChainConfig::regtest_with(RskjActivations::regtest(), Some(spec)).unwrap();
     let hardfork_cfg = RskHardforkConfig::for_chain(&config);
@@ -26,7 +29,9 @@ fn rskj_regtest_genesis_hash() {
 
     assert_eq!(
         config.known_genesis_hash(),
-        Some(b256!("227d8e8d835f5e7290e333f4177e551ef1222dde4704f677ba4a120051c31cc2"))
+        Some(b256!(
+            "227d8e8d835f5e7290e333f4177e551ef1222dde4704f677ba4a120051c31cc2"
+        ))
     );
     let header = config.genesis_header();
     assert_eq!(header.gas_limit, U256::from(25_000_000));
