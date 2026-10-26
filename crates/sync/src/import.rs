@@ -18,10 +18,11 @@ use alloy_primitives::{B256, U256};
 use alloy_rlp::Decodable;
 use rustock_core::validation::{HeaderVerifier, ValidationError};
 use rustock_core::{Block, Header, Transaction};
-use rustock_execution::{BlockProcessor, ProcessError};
+use rustock_execution::{BlockProcessor, ProcessError, ProcessTimings};
 use rustock_storage::BlockStore;
 use rustock_trie::{TrieNode, TrieStore};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Why a block was not imported.
 #[derive(Debug, thiserror::Error)]
@@ -74,6 +75,59 @@ pub struct ImportedBlock {
     pub gas_used: u64,
     /// Whether this block's import ended with a flush of the trie store.
     pub flushed: bool,
+    /// Where the time went, when the importer measures it
+    /// ([`BlockImporter::measure`]).
+    pub timings: Option<ImportTimings>,
+}
+
+/// Wall time of each step of [`BlockImporter::import`], from a monotonic
+/// clock. `total` covers the whole call; the steps run in this order.
+#[derive(Debug, Default, Clone)]
+pub struct ImportTimings {
+    pub total: Duration,
+    /// Checking that the block extends the best block.
+    pub preamble: Duration,
+    /// `HeaderVerifier::verify` against the parent.
+    pub header_validation: Duration,
+    /// Header, total difficulty, canonical index and body stored.
+    pub store_block: Duration,
+    /// `BlockProcessor::process_and_commit`, by stage.
+    pub process: ProcessTimings,
+    /// Trie store flushed to disk (zero on blocks without a flush).
+    pub flush: Duration,
+    /// Executed head recorded (with the flush).
+    pub exec_head: Duration,
+}
+
+/// Measures consecutive steps; does not read the clock when disabled.
+struct Laps {
+    start: Option<Instant>,
+    last: Option<Instant>,
+}
+
+impl Laps {
+    fn new(enabled: bool) -> Self {
+        let now = enabled.then(Instant::now);
+        Self {
+            start: now,
+            last: now,
+        }
+    }
+
+    fn lap(&mut self) -> Duration {
+        match self.last {
+            Some(last) => {
+                let now = Instant::now();
+                self.last = Some(now);
+                now - last
+            }
+            None => Duration::ZERO,
+        }
+    }
+
+    fn total(&self) -> Duration {
+        self.start.map(|s| s.elapsed()).unwrap_or_default()
+    }
 }
 
 /// Imports a chain block by block on top of the store's best block.
@@ -89,6 +143,7 @@ pub struct BlockImporter {
     flush_every: u64,
     imported: u64,
     last_executed: Option<(B256, B256)>,
+    measure: bool,
 }
 
 impl BlockImporter {
@@ -122,7 +177,15 @@ impl BlockImporter {
             flush_every,
             imported: 0,
             last_executed: None,
+            measure: false,
         })
+    }
+
+    /// Measure each import ([`ImportedBlock::timings`]). Off by default; it
+    /// only reads a monotonic clock between steps.
+    pub fn measure(mut self, measure: bool) -> Self {
+        self.measure = measure;
+        self
     }
 
     /// Hash and number of the best block.
@@ -132,6 +195,8 @@ impl BlockImporter {
 
     /// Validate, execute and store `block` as the new best block.
     pub fn import(&mut self, block: Block) -> Result<ImportedBlock, ImportError> {
+        let mut laps = Laps::new(self.measure);
+        let mut t = ImportTimings::default();
         let header = &block.header;
         let hash = header.hash();
         if header.parent_hash != self.best_hash || header.number != self.best.number + 1 {
@@ -142,26 +207,44 @@ impl BlockImporter {
                 best_hash: self.best_hash,
             });
         }
+        t.preamble = laps.lap();
 
         self.verifier.verify(header, Some(&self.best))?;
+        t.header_validation = laps.lap();
 
         let td = self.best_td + header.difficulty;
         self.store
             .store_headers_batch(&[(header, td)], Some(self.best_hash), self.best_td)?;
         self.store
             .put_body(hash, &block.transactions, &block.ommers)?;
+        t.store_block = laps.lap();
 
-        let result =
+        let state_root = &self.state_root;
+        let trie_store = self.trie_store.clone();
+        let result = if self.measure {
+            self.processor.process_and_commit_timed(
+                &block,
+                state_root,
+                trie_store,
+                &mut t.process,
+            )?
+        } else {
             self.processor
-                .process_and_commit(&block, &self.state_root, self.trie_store.clone())?;
+                .process_and_commit(&block, state_root, trie_store)?
+        };
+        laps.lap();
         self.state_root = result.new_state_root;
         self.last_executed = Some((hash, result.state_root_hash));
 
         self.imported += 1;
         let flushed = self.imported.is_multiple_of(self.flush_every);
         if flushed {
-            self.flush()?;
+            self.trie_store.flush();
+            t.flush = laps.lap();
+            self.record_exec_head()?;
+            t.exec_head = laps.lap();
         }
+        t.total = laps.total();
 
         let imported = ImportedBlock {
             number: header.number,
@@ -169,6 +252,7 @@ impl BlockImporter {
             tx_count: block.transactions.len(),
             gas_used: header.gas_used,
             flushed,
+            timings: self.measure.then_some(t),
         };
         self.best_hash = hash;
         self.best_td = td;
@@ -176,10 +260,8 @@ impl BlockImporter {
         Ok(imported)
     }
 
-    /// Persist the trie and record the executed head (what batch sync does
-    /// at each flush).
-    fn flush(&mut self) -> anyhow::Result<()> {
-        self.trie_store.flush();
+    /// Record the executed head (batch sync does it at each flush).
+    fn record_exec_head(&mut self) -> anyhow::Result<()> {
         if let Some((hash, root)) = self.last_executed.take() {
             self.store.set_exec_head(hash, root)?;
         }
@@ -188,7 +270,8 @@ impl BlockImporter {
 
     /// Flush whatever the last blocks left in memory.
     pub fn finish(mut self) -> anyhow::Result<()> {
-        self.flush()
+        self.trie_store.flush();
+        self.record_exec_head()
     }
 }
 

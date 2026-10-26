@@ -7,6 +7,7 @@ use rustock_core::{Block, Log, Receipt, Transaction, ordered_trie_root, ordered_
 use rustock_storage::BlockStore;
 use rustock_trie::{TrieNode, TrieStore};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::debug;
 
 use crate::executor::RskExecutor;
@@ -52,6 +53,59 @@ fn orchid_check_interval() -> Option<u64> {
     })
 }
 
+/// Wall time spent in each stage of [`BlockProcessor::process_and_commit`],
+/// for harness instrumentation ([`BlockProcessor::process_and_commit_timed`]).
+/// The stages run in this order and cover the whole call.
+#[derive(Debug, Default, Clone)]
+pub struct ProcessTimings {
+    /// Transactions root and ommers hash checked against the header.
+    pub pre_validation: Duration,
+    /// Transaction senders recovered from their signatures.
+    pub sender_recovery: Duration,
+    /// Transactions executed (`RskExecutor::execute_block`).
+    pub execution: Duration,
+    /// Receipts and logs blooms built from the execution results.
+    pub receipts: Duration,
+    /// State changes applied to the trie (`apply_state_changes`).
+    pub apply_state: Duration,
+    /// New state root hashed.
+    pub state_root: Duration,
+    /// Trie nodes saved to the trie store and the root reloaded lazily.
+    pub trie_save: Duration,
+    /// Receipts trie root computed.
+    pub receipts_root: Duration,
+    /// Gas used, paid fees, state root, receipts root and logs bloom checked
+    /// against the header.
+    pub post_validation: Duration,
+    /// Receipts written to the block store.
+    pub save_receipts: Duration,
+}
+
+/// Measures consecutive stages; does not read the clock when disabled.
+struct StageClock {
+    last: Option<Instant>,
+}
+
+impl StageClock {
+    fn new(enabled: bool) -> Self {
+        Self {
+            last: enabled.then(Instant::now),
+        }
+    }
+
+    /// Time since the previous lap (zero when disabled).
+    fn lap(&mut self) -> Duration {
+        match self.last {
+            Some(last) => {
+                let now = Instant::now();
+                self.last = Some(now);
+                now - last
+            }
+            None => Duration::ZERO,
+        }
+    }
+}
+
 /// Result of processing a block.
 #[derive(Debug)]
 pub struct ProcessedBlock {
@@ -91,10 +145,29 @@ impl BlockProcessor {
         state_root: &TrieNode,
         trie_store: Arc<dyn TrieStore>,
     ) -> Result<ProcessedBlock, ProcessError> {
+        self.execute_block_inner(block, state_root, trie_store, None)
+    }
+
+    fn execute_block_inner(
+        &self,
+        block: &Block,
+        state_root: &TrieNode,
+        trie_store: Arc<dyn TrieStore>,
+        mut timings: Option<&mut ProcessTimings>,
+    ) -> Result<ProcessedBlock, ProcessError> {
+        let mut clock = StageClock::new(timings.is_some());
+        let mut record = |stage: fn(&mut ProcessTimings) -> &mut Duration,
+                          clock: &mut StageClock| {
+            let elapsed = clock.lap();
+            if let Some(t) = timings.as_deref_mut() {
+                *stage(t) += elapsed;
+            }
+        };
         let header = &block.header;
         let chain_id = self.hardfork_cfg.chain_id;
 
         let tx_senders = self.recover_senders(&block.transactions, chain_id)?;
+        record(|t| &mut t.sender_recovery, &mut clock);
 
         let transactions: Vec<(Transaction, Address)> = block
             .transactions
@@ -109,6 +182,7 @@ impl BlockProcessor {
             state_root,
             trie_store.clone(),
         )?;
+        record(|t| &mut t.execution, &mut clock);
 
         let mut receipts = Vec::with_capacity(exec_result.tx_results.len());
         let mut cumulative_gas = 0u64;
@@ -140,13 +214,17 @@ impl BlockProcessor {
             ));
         }
 
+        record(|t| &mut t.receipts, &mut clock);
+
         let mut new_state_root = apply_state_changes(
             state_root,
             trie_store.as_ref(),
             &exec_result.state_changes,
             &exec_result.markers,
         );
+        record(|t| &mut t.apply_state, &mut clock);
         let state_root_hash = new_state_root.compute_hash(trie_store.as_ref());
+        record(|t| &mut t.state_root, &mut clock);
         new_state_root.save(trie_store.as_ref(), true);
         // Reload the root lazily: children become hash references resolved on
         // demand, so subsequent blocks only walk their dirty paths instead of
@@ -156,8 +234,10 @@ impl BlockProcessor {
             .get(state_root_hash.as_slice())
             .map(|data| rustock_trie::TrieNode::from_message(&data, trie_store.as_ref()))
             .unwrap_or(new_state_root);
+        record(|t| &mut t.trie_save, &mut clock);
         let receipts_root =
             ordered_trie_root(&receipts, self.hardfork_cfg.has_unitrie_state_root(header.number));
+        record(|t| &mut t.receipts_root, &mut clock);
 
         Ok(ProcessedBlock {
             receipts,
@@ -180,6 +260,17 @@ impl BlockProcessor {
         state_root: &TrieNode,
         trie_store: Arc<dyn TrieStore>,
     ) -> Result<ProcessedBlock, ProcessError> {
+        self.process_block_inner(block, state_root, trie_store, None)
+    }
+
+    fn process_block_inner(
+        &self,
+        block: &Block,
+        state_root: &TrieNode,
+        trie_store: Arc<dyn TrieStore>,
+        mut timings: Option<&mut ProcessTimings>,
+    ) -> Result<ProcessedBlock, ProcessError> {
+        let mut clock = StageClock::new(timings.is_some());
         let header = &block.header;
 
         let computed_tx_root = ordered_tx_trie_root(
@@ -201,7 +292,18 @@ impl BlockProcessor {
             });
         }
 
-        let result = self.execute_block(block, state_root, trie_store.clone())?;
+        let pre_validation = clock.lap();
+        if let Some(t) = timings.as_deref_mut() {
+            t.pre_validation += pre_validation;
+        }
+
+        let result = self.execute_block_inner(
+            block,
+            state_root,
+            trie_store.clone(),
+            timings.as_deref_mut(),
+        )?;
+        clock.lap();
 
         if result.gas_used != header.gas_used {
             for (i, r) in result.receipts.iter().enumerate() {
@@ -289,6 +391,10 @@ impl BlockProcessor {
             tx_count = result.receipts.len(),
             "block processed successfully"
         );
+        let post_validation = clock.lap();
+        if let Some(t) = timings {
+            t.post_validation += post_validation;
+        }
 
         Ok(result)
     }
@@ -320,6 +426,25 @@ impl BlockProcessor {
         self.block_store
             .put_receipts(hash, &result.receipts)
             .map_err(ProcessError::Storage)?;
+        Ok(result)
+    }
+
+    /// [`BlockProcessor::process_and_commit`], adding the time spent in each
+    /// stage to `timings`. Instrumentation only: the work done is the same.
+    pub fn process_and_commit_timed(
+        &self,
+        block: &Block,
+        state_root: &TrieNode,
+        trie_store: Arc<dyn TrieStore>,
+        timings: &mut ProcessTimings,
+    ) -> Result<ProcessedBlock, ProcessError> {
+        let result = self.process_block_inner(block, state_root, trie_store, Some(timings))?;
+        let started = Instant::now();
+        let hash = block.hash();
+        self.block_store
+            .put_receipts(hash, &result.receipts)
+            .map_err(ProcessError::Storage)?;
+        timings.save_receipts += started.elapsed();
         Ok(result)
     }
 

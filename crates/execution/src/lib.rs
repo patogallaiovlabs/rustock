@@ -28,6 +28,6 @@ pub use precompiles::{
     rsk_precompiles, is_rsk_precompile,
     BRIDGE_ADDR, REMASC_ADDR,
 };
-pub use processor::{BlockProcessor, ProcessError, ProcessedBlock};
+pub use processor::{BlockProcessor, ProcessError, ProcessTimings, ProcessedBlock};
 pub use remasc::RemascConfig;
 pub use state::apply_state_changes;

@@ -116,3 +116,33 @@ fn stops_at_a_block_whose_state_root_differs() {
     let err = importer.import(block).unwrap_err();
     assert_eq!(err.check(), "stateRoot", "{err}");
 }
+
+#[test]
+fn measured_import_reports_stages_within_the_total() {
+    let blocks = blocks();
+    let dir = tempfile::tempdir().unwrap();
+    let mut importer = importer(dir.path()).measure(true);
+    for block in blocks {
+        let imported = importer.import(block).unwrap();
+        let t = imported.timings.expect("measured");
+        let p = &t.process;
+        let stages = t.preamble
+            + t.header_validation
+            + t.store_block
+            + p.pre_validation
+            + p.sender_recovery
+            + p.execution
+            + p.receipts
+            + p.apply_state
+            + p.state_root
+            + p.trie_save
+            + p.receipts_root
+            + p.post_validation
+            + p.save_receipts
+            + t.flush
+            + t.exec_head;
+        assert!(!t.total.is_zero());
+        assert!(stages <= t.total, "{stages:?} > {:?}", t.total);
+        assert_eq!(t.flush.is_zero(), !imported.flushed);
+    }
+}
