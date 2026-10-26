@@ -128,6 +128,77 @@ struct Args {
     /// absorb dead/unreachable nodes and recover faster after a network blip.
     #[arg(long, default_value_t = 25)]
     max_peers: usize,
+
+    #[command(flatten)]
+    chain: ChainArgs,
+}
+
+/// Chain options in rskj's own terms (regtest only). Defaults follow rskj's
+/// `config/regtest.conf`.
+#[derive(clap::Args, Debug, Clone, Default)]
+struct ChainArgs {
+    /// rskj genesis JSON file (rskj `genesis = <file>`), e.g. a regtest
+    /// genesis with pre-funded accounts. Regtest only.
+    #[arg(long)]
+    genesis: Option<std::path::PathBuf>,
+
+    /// Network-upgrade height, as in rskj `blockchain.config.hardforkActivationHeights`:
+    /// NAME=HEIGHT, -1 disables (e.g. --hardfork lovell700=0). Repeatable. Regtest only.
+    #[arg(long = "hardfork", value_name = "NAME=HEIGHT")]
+    hardforks: Vec<String>,
+
+    /// Consensus-rule height, as in rskj `blockchain.config.consensusRules`:
+    /// RULE=HEIGHT or RULE=UPGRADE, -1 disables (e.g. --consensus-rule rskip144=-1
+    /// --consensus-rule rskip97=0). Repeatable. Regtest only. Supported rules:
+    /// rskip92, rskip97, rskip110, rskip144 (-1 only), rskip156, rskipUMM,
+    /// rskip351, rskip535.
+    #[arg(long = "consensus-rule", value_name = "RULE=HEIGHT")]
+    consensus_rules: Vec<String>,
+}
+
+impl ChainArgs {
+    /// The chain configuration for a network id plus these options.
+    fn chain_config(&self, network_id: u64) -> Result<ChainConfig> {
+        use rustock_core::rskj_config::{
+            GenesisSpec, RskjActivations, CONSENSUS_RULES, NETWORK_UPGRADES,
+        };
+        let customized = self.genesis.is_some()
+            || !self.hardforks.is_empty()
+            || !self.consensus_rules.is_empty();
+        match network_id {
+            30 | 31 if customized => {
+                anyhow::bail!("--genesis, --hardfork and --consensus-rule are regtest-only")
+            }
+            30 => return Ok(ChainConfig::mainnet()),
+            31 => return Ok(ChainConfig::testnet()),
+            _ => {}
+        }
+        let mut activations = RskjActivations::regtest();
+        for o in &self.hardforks {
+            let name = o.split('=').next().unwrap_or("").trim();
+            anyhow::ensure!(
+                NETWORK_UPGRADES.contains(&name),
+                "--hardfork {o}: unknown network upgrade (known: {})",
+                NETWORK_UPGRADES.join(", ")
+            );
+            activations.apply_override(o)?;
+        }
+        for o in &self.consensus_rules {
+            let name = o.split('=').next().unwrap_or("").trim();
+            anyhow::ensure!(
+                CONSENSUS_RULES.iter().any(|(r, _)| *r == name),
+                "--consensus-rule {o}: unsupported rule (supported: {})",
+                CONSENSUS_RULES.map(|(r, _)| r).join(", ")
+            );
+            activations.apply_override(o)?;
+        }
+        let genesis = self
+            .genesis
+            .as_deref()
+            .map(GenesisSpec::from_file)
+            .transpose()?;
+        ChainConfig::regtest_with(activations, genesis)
+    }
 }
 
 #[tokio::main]
@@ -166,17 +237,18 @@ async fn main() -> Result<()> {
 
     info!("Starting Rustock on port {}...", args.port);
 
-    let config = match args.network_id {
-        30 => ChainConfig::mainnet(),
-        31 => ChainConfig::testnet(),
-        _ => ChainConfig::regtest(),
-    };
-    let config = Arc::new(config);
+    let mut config = args.chain.chain_config(args.network_id)?;
     // Block-hash computation (RSKIP92) needs the activation heights before
     // any header is decoded.
     config.activation_heights.clone().install();
+    let hardfork_cfg = rustock_execution::RskHardforkConfig::for_chain(&config);
 
     let store = Arc::new(BlockStore::open(&args.data_dir)?);
+    let trie_store_for_exec: Arc<dyn rustock_trie::TrieStore> = Arc::new(
+        rustock_storage::CachedTrieStore::with_defaults(store.db().clone()),
+    );
+    prepare_genesis_spec(&mut config, &hardfork_cfg, trie_store_for_exec.as_ref());
+    let config = Arc::new(config);
 
     let genesis_hash = setup_genesis(&store, &config)?;
     info!("Genesis Hash: {:?}", genesis_hash);
@@ -254,18 +326,18 @@ async fn main() -> Result<()> {
         trie_store_for_pool,
     ));
 
-    let hardfork_cfg = rustock_execution::RskHardforkConfig::for_network(config.chain_id as u64);
     let block_processor = rustock_execution::BlockProcessor::new(
         hardfork_cfg.clone(),
         store.clone(),
     );
     info!("Block processor wired (hardfork config: {:?})", hardfork_cfg);
 
-    let trie_store_for_exec: Arc<dyn rustock_trie::TrieStore> =
-        Arc::new(rustock_storage::CachedTrieStore::with_defaults(store.db().clone()));
-
-    let initial_state_root = load_or_build_state(&store, &config, trie_store_for_exec.as_ref())?;
-    info!("Initial state root: {:?}", initial_state_root.compute_hash(trie_store_for_exec.as_ref()));
+    let initial_state_root =
+        load_or_build_state(&store, &config, &hardfork_cfg, trie_store_for_exec.as_ref())?;
+    info!(
+        "Initial state root: {:?}",
+        initial_state_root.compute_hash(trie_store_for_exec.as_ref())
+    );
 
     let mut sync_service = SyncService::new(sync_manager.clone(), peer_store.clone(), event_rx)
         .with_tx_pool(pool.clone())
@@ -328,6 +400,7 @@ async fn main() -> Result<()> {
 fn load_or_build_state(
     store: &BlockStore,
     config: &ChainConfig,
+    hardfork_cfg: &rustock_execution::RskHardforkConfig,
     trie_store: &dyn TrieStore,
 ) -> Result<TrieNode> {
     if let Some((exec_hash, state_root)) = store.exec_head()? {
@@ -355,7 +428,36 @@ fn load_or_build_state(
         }
     }
 
+    if let Some(spec) = &config.genesis_spec {
+        return Ok(rustock_execution::genesis::build_genesis_state(
+            spec,
+            hardfork_cfg,
+            trie_store,
+        ));
+    }
     build_genesis_state(config, trie_store)
+}
+
+/// For a chain loaded from an rskj genesis file: build the genesis state and
+/// record its root in the genesis header (unless the file sets `stateRoot`),
+/// so the genesis hash can be computed before the block store is set up.
+fn prepare_genesis_spec(
+    config: &mut ChainConfig,
+    hardfork_cfg: &rustock_execution::RskHardforkConfig,
+    trie_store: &dyn TrieStore,
+) {
+    if let Some(spec) = config.genesis_spec.as_mut() {
+        if spec.state_root.is_none() {
+            let root =
+                rustock_execution::genesis::build_genesis_state(spec, hardfork_cfg, trie_store);
+            spec.state_root = Some(root.compute_hash(trie_store));
+        }
+        info!(
+            "Genesis from file: hash {:?}, state root {:?}",
+            spec.hash(),
+            spec.state_root
+        );
+    }
 }
 
 /// Build the genesis state trie from the chain config's alloc entries.
