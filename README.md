@@ -37,6 +37,13 @@ A Rootstock (RSK) full node implementation in Rust. Rustock syncs and validates 
 cargo build --workspace --release
 ```
 
+Or in Docker: the `Dockerfile` builds `rustock-cli` on Ubuntu 22.04 (glibc 2.35) with a pinned Rust toolchain, for `linux/amd64` and `linux/arm64`, and puts it at `/usr/local/bin/rustock-cli` in an Ubuntu 22.04 runtime image:
+
+```bash
+docker build -t rustock .
+docker run --rm rustock rustock-cli --help
+```
+
 ### Running
 
 Start the full node on RSK Mainnet (default):
