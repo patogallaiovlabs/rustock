@@ -117,6 +117,43 @@ impl RskHardforkConfig {
         }
     }
 
+    /// Build the upgrade ladder from rskj network-upgrade heights (the same
+    /// table the chain config derives its header rules from).
+    ///
+    /// The ladder is linear: an upgrade is active once any later upgrade is.
+    /// rskj upgrades rustock does not model as ladder steps (bahamas,
+    /// afterBridgeSync, orchid060, hop401, tbd1000) are ignored here; the
+    /// rules they gate keep their per-chain handling below. A disabled upgrade
+    /// followed by an enabled one (regtest's arrowhead631 = -1) therefore
+    /// still counts as active.
+    pub fn from_rskj(
+        activations: &rustock_core::rskj_config::RskjActivations,
+        chain_id: u64,
+    ) -> Self {
+        let mut activations: Vec<(u64, RskNetworkUpgrade)> =
+            std::iter::once((0, RskNetworkUpgrade::Genesis))
+                .chain(
+                    activations
+                        .upgrades()
+                        .filter_map(|(name, height)| Some((height?, rskj_upgrade(name)?))),
+                )
+                .collect();
+        activations.sort();
+        Self {
+            activations,
+            chain_id,
+        }
+    }
+
+    /// The ladder for a chain config: its rskj table when it has one, else
+    /// the built-in table of its network.
+    pub fn for_chain(config: &rustock_core::config::ChainConfig) -> Self {
+        match &config.rskj_activations {
+            Some(activations) => Self::from_rskj(activations, config.chain_id as u64),
+            None => Self::for_network(config.chain_id as u64),
+        }
+    }
+
     /// Creates a config where all upgrades are active from genesis (useful for testing).
     pub fn all_active(chain_id: u64) -> Self {
         Self {
@@ -555,6 +592,26 @@ impl RskHardforkConfig {
     }
 }
 
+/// The ladder step for an rskj network-upgrade name, if rustock models it.
+fn rskj_upgrade(name: &str) -> Option<RskNetworkUpgrade> {
+    Some(match name {
+        "orchid" => RskNetworkUpgrade::Orchid,
+        "wasabi100" => RskNetworkUpgrade::Wasabi100,
+        "twoToThree" => RskNetworkUpgrade::TwoToThree,
+        "papyrus200" => RskNetworkUpgrade::Papyrus200,
+        "iris300" => RskNetworkUpgrade::Iris300,
+        "hop400" => RskNetworkUpgrade::Hop400,
+        "fingerroot500" => RskNetworkUpgrade::Fingerroot500,
+        "arrowhead600" => RskNetworkUpgrade::Arrowhead600,
+        "arrowhead631" => RskNetworkUpgrade::Arrowhead631,
+        "lovell700" => RskNetworkUpgrade::Lovell700,
+        "reed800" => RskNetworkUpgrade::Reed800,
+        "reed810" => RskNetworkUpgrade::Reed810,
+        "vetiver900" => RskNetworkUpgrade::Vetiver900,
+        _ => return None,
+    })
+}
+
 fn upgrade_to_spec_id(upgrade: RskNetworkUpgrade) -> SpecId {
     match upgrade {
         RskNetworkUpgrade::Genesis
@@ -800,5 +857,70 @@ mod tests {
         assert!(special(5_009_384)); // the divergent block
         assert!(special(5_467_999));
         assert!(!special(5_468_000));
+    }
+
+    #[test]
+    fn rskj_regtest_ladder_agrees_with_the_core_activation_heights() {
+        let chain = rustock_core::config::ChainConfig::regtest();
+        let cfg = RskHardforkConfig::for_chain(&chain);
+        let heights = &chain.activation_heights;
+        assert_eq!(
+            cfg.activation_height(RskNetworkUpgrade::Orchid),
+            Some(heights.orchid)
+        );
+        assert_eq!(
+            cfg.activation_height(RskNetworkUpgrade::Wasabi100),
+            Some(heights.wasabi100)
+        );
+        assert_eq!(
+            cfg.activation_height(RskNetworkUpgrade::Papyrus200),
+            Some(heights.papyrus200)
+        );
+        assert_eq!(cfg.active_upgrade(0), RskNetworkUpgrade::Vetiver900);
+        // rskj loads the genesis with the RSKIP126 (wasabi100) precompile
+        // markers: the upgrade activates at block 0.
+        assert!(cfg.is_activating(RskNetworkUpgrade::Wasabi100, 0));
+        // regtest.conf: arrowhead631 = -1 (not a ladder step).
+        assert_eq!(cfg.activation_height(RskNetworkUpgrade::Arrowhead631), None);
+        assert_eq!(cfg.chain_id, 33);
+    }
+
+    #[test]
+    fn rskj_overrides_move_ladder_steps() {
+        let mut a = rustock_core::rskj_config::RskjActivations::regtest();
+        for o in [
+            "iris300=10",
+            "hop400=10",
+            "fingerroot500=10",
+            "arrowhead600=10",
+            "lovell700=20",
+            "reed800=20",
+            "reed810=20",
+            "vetiver900=20",
+        ] {
+            a.apply_override(o).unwrap();
+        }
+        let cfg = RskHardforkConfig::from_rskj(&a, 33);
+        assert_eq!(cfg.active_upgrade(9), RskNetworkUpgrade::Papyrus200);
+        assert_eq!(cfg.active_upgrade(10), RskNetworkUpgrade::Arrowhead600);
+        assert_eq!(cfg.active_upgrade(20), RskNetworkUpgrade::Vetiver900);
+    }
+
+    #[test]
+    fn mainnet_core_heights_agree_with_the_ladder() {
+        let core = rustock_core::config::ActivationHeights::mainnet();
+        let cfg = RskHardforkConfig::mainnet();
+        assert_eq!(
+            cfg.activation_height(RskNetworkUpgrade::Orchid),
+            Some(core.orchid)
+        );
+        assert_eq!(
+            cfg.activation_height(RskNetworkUpgrade::Wasabi100),
+            Some(core.wasabi100)
+        );
+        assert_eq!(
+            cfg.activation_height(RskNetworkUpgrade::Papyrus200),
+            Some(core.papyrus200)
+        );
     }
 }

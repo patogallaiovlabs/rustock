@@ -2,6 +2,7 @@ pub mod bridge;
 pub mod database;
 pub mod env;
 pub mod executor;
+pub mod genesis;
 pub mod hardfork;
 pub mod precompiles;
 pub mod processor;
