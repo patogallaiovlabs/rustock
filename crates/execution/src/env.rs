@@ -91,6 +91,7 @@ mod tests {
             receipts_root: B256::ZERO,
             logs_bloom: Bloom::ZERO,
             extension_data: None,
+            header_extension: None,
             difficulty: U256::from(1_000_000),
             number,
             gas_limit: U256::from(6_800_000),

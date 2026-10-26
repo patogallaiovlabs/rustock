@@ -2292,7 +2292,7 @@ mod tests {
             parent_hash: B256::ZERO, ommers_hash: B256::ZERO,
             beneficiary: Address::ZERO, state_root: B256::ZERO,
             transactions_root: B256::ZERO, receipts_root: B256::ZERO,
-            logs_bloom: Bloom::ZERO, extension_data: None,
+            logs_bloom: Bloom::ZERO, extension_data: None, header_extension: None,
             difficulty: U256::ZERO, number: 0, gas_limit: U256::ZERO,
             gas_used: 0, timestamp: 0, extra_data: ABytes::new(),
             paid_fees: U256::ZERO, minimum_gas_price: U256::ZERO,

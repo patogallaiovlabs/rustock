@@ -31,7 +31,7 @@ impl DifficultyRule {
 
         // Pre-RSKIP97 (before orchid): if more than 10 minutes since parent,
         // reset difficulty to minimum to allow fallback private mining.
-        let rskip97_active = header.number >= activations.orchid;
+        let rskip97_active = header.number >= activations.rskip97;
         if !rskip97_active {
             let delta_ts = header.timestamp.saturating_sub(parent.timestamp);
             if delta_ts >= TEN_MINUTES {
@@ -63,8 +63,9 @@ impl DifficultyRule {
             return parent.difficulty;
         }
 
-        // RSKIP156 (papyrus200): difficulty divisor changes from 50 to 400.
-        let divisor = if header.number >= activations.papyrus200 {
+        // RSKIP156 (papyrus200): difficulty divisor changes from 50 to 400,
+        // except on regtest (rskj Constants.getDifficultyBoundDivisor).
+        let divisor = if header.number >= activations.papyrus200 && self.config.chain_id != 33 {
             RSKIP156_DIFFICULTY_DIVISOR
         } else {
             self.config.difficulty_divisor

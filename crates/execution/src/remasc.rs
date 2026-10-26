@@ -798,6 +798,7 @@ mod tests {
             receipts_root: B256::ZERO,
             logs_bloom: alloy_primitives::Bloom::ZERO,
             extension_data: None,
+            header_extension: None,
             difficulty: U256::from(1_000_000),
             number: 5,
             gas_limit: U256::from(6_800_000),

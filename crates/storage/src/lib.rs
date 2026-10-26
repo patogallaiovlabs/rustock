@@ -534,6 +534,7 @@ mod tests {
             receipts_root: B256::ZERO,
             logs_bloom: Default::default(),
             extension_data: None,
+            header_extension: None,
             difficulty: U256::ZERO,
             gas_limit: U256::ZERO,
             gas_used: 0,
