@@ -78,6 +78,8 @@ rustock-cli import-blocks --file blocks.txt.gz --datadir ./import \
 
 The trie store is flushed every `--flush-every` blocks (default 10, like rskj's `blockchain.flushNumberOfBlocks` setting in a lab replay) and at the end.
 
+With `--breakdown-log <path>`, it writes one line per block with the time spent in each stage, in the format of rskj's `block connect breakdown best:` debug line (`block=<n> hash=<hex> totalMs=<ms> ... txCount=<n> gasUsed=<n>`, milliseconds from a monotonic clock). Keys shared with rskj cover the same work (`executeMs`, `saveReceiptsMs`, `onBestBlockMs`, ...); the others are rustock's own stages (`senderRecoveryMs`, `evmMs`, `stateRootMs`, `trieSaveMs`, `flushMs`, ...). `totalMs` covers the block's import, flush included; decoding the line is not part of it.
+
 ### Testing
 
 ```bash
