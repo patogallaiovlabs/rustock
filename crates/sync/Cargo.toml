@@ -12,6 +12,7 @@ rustock-trie = { version = "0.1.0", path = "../trie" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 alloy-primitives = { workspace = true }
 alloy-rlp = { workspace = true }
 futures = "0.3.31"

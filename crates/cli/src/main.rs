@@ -11,6 +11,8 @@ use anyhow::{Result, Context};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+mod import_blocks;
+
 /// Reads block bodies from a synced rskj `blocks` LevelDB (keyed by block
 /// hash → RLP[header, txs, ommers]) so the node can reuse an existing local
 /// chain instead of re-downloading bodies from peers.
@@ -131,6 +133,16 @@ struct Args {
 
     #[command(flatten)]
     chain: ChainArgs,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Import blocks from a file (rskj ExportBlocks format) into an empty
+    /// data directory, validating and executing each one like sync does.
+    ImportBlocks(import_blocks::ImportBlocksArgs),
 }
 
 /// Chain options in rskj's own terms (regtest only). Defaults follow rskj's
@@ -214,6 +226,9 @@ impl ChainArgs {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(Command::ImportBlocks(import)) = args.command {
+        return import_blocks::run(import);
+    }
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(&args.log_level));

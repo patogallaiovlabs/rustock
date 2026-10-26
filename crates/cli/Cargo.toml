@@ -24,3 +24,4 @@ hex = "0.4.3"
 tracing-appender = "0.2.4"
 rocksdb = "0.22.0"
 alloy-rlp = { workspace = true }
+flate2 = "1.0.35"
