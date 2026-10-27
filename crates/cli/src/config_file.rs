@@ -293,6 +293,8 @@ pub struct MiningSection {
     pub coinbase: Option<String>,
     pub extra_data: Option<String>,
     pub refresh_secs: Option<u64>,
+    pub timed: Option<String>,
+    pub flush_every: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -469,6 +471,8 @@ pub const CONFIGURABLE: &[&str] = &[
     "mining_coinbase",
     "mining_extra_data",
     "mining_refresh_secs",
+    "mine_timed",
+    "flush_every",
     "account_tx_rate_limit",
     "account_tx_rate_limit_cleaner_period",
     "account_tx_rate_limit_max_accounts",

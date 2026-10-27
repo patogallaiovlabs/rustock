@@ -3349,6 +3349,7 @@ dependencies = [
  "hex",
  "k256",
  "lru",
+ "rand 0.8.6",
  "revm",
  "ripemd",
  "rustock-core",

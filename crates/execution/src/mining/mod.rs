@@ -25,12 +25,14 @@ pub mod merkle;
 pub mod server;
 pub mod uncles;
 pub mod template;
+pub mod timed;
 
 pub use server::{
     ChainAccess, ImportResult, MinerServer, MinerWork, StoreChainAccess, SubmitError,
     SubmittedBlockInfo, extract_merged_mining_hash,
 };
 pub use uncles::{UNCLE_GENERATION_LIMIT, UNCLE_LIST_LIMIT, select_uncles};
+pub use timed::{Pow, TimedMiner, TimedSchedule};
 pub use template::{
     BlockTemplate, BlockTemplateBuilder, MiningConfig, NoPendingTransactions, PendingTransaction,
     PendingTransactionSource, TemplateError, difficulty_to_target, remasc_transaction,
