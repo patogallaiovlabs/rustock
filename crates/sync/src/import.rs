@@ -115,8 +115,11 @@ pub struct ImportTimings {
     /// Header against its parent, body rules, transactions root and ommers
     /// hash (rskj `initialValidationMs`).
     pub initial_validation: Duration,
-    /// `execute_block` (rskj `executeMs`).
+    /// `execute_block` (rskj `executeMs`). Includes `trie_save`.
     pub execute: Duration,
+    /// The part of `execute` spent writing dirty trie nodes into the trie
+    /// store (`TrieNode::save`). Zero when the block was not timed.
+    pub trie_save: Duration,
     /// Results checked against the header (rskj `postExecuteValidationMs`).
     pub post_execute_validation: Duration,
     /// Header, total difficulty, canonical index and body stored (rskj
@@ -138,7 +141,7 @@ impl ImportTimings {
         let ms = |d: Duration| format!("{:.3}", d.as_secs_f64() * 1000.0);
         format!(
             "block connect breakdown best: block={} hash={} totalMs={} preambleMs={} \
-             initialValidationMs={} executeMs={} postExecuteValidationMs={} switchChainMs={} \
+             initialValidationMs={} executeMs={} trieSaveMs={} postExecuteValidationMs={} switchChainMs={} \
              saveReceiptsMs={} onBestBlockMs={} txCount={} gasUsed={}",
             block.number,
             alloy_primitives::hex::encode(block.hash),
@@ -146,6 +149,7 @@ impl ImportTimings {
             ms(self.preamble),
             ms(self.initial_validation),
             ms(self.execute),
+            ms(self.trie_save),
             ms(self.post_execute_validation),
             ms(self.switch_chain),
             ms(self.save_receipts),
@@ -292,6 +296,7 @@ impl BlockImporter {
         laps.lap();
         t.initial_validation += process.pre_validation;
         t.execute = process.execute;
+        t.trie_save = process.trie_save;
         t.post_execute_validation = process.post_validation;
 
         let td = self.best_td + header.difficulty;
@@ -463,7 +468,7 @@ mod tests {
             "block connect breakdown best: block=7 hash={} totalMs=12.345 preambleMs=0.000 ",
             "ab".repeat(32)
         )));
-        assert!(line.contains(" executeMs=10.000 "));
+        assert!(line.contains(" executeMs=10.000 trieSaveMs=0.000 "));
         assert!(line.ends_with(" onBestBlockMs=0.000 txCount=21 gasUsed=24000000"));
     }
 
