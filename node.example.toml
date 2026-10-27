@@ -290,6 +290,8 @@
 # coinbase = "0x…"                  # default: unset — REQUIRED when enabled
 # extra_data = ""                   # default — at most 32 bytes
 # refresh_secs = 60                 # default
+# timed = "10s"                     # default: unset — mine on rskj's regtest clock (timedMine): exponential delays with this median
+# flush_every = 10                  # default — mined blocks between trie flushes (rskj blockchain.flushNumberOfBlocks)
 
 # Per-account virtual gas quota (rskj TxQuotaChecker). An account accumulates
 # quota while idle and spends it when broadcasting, so one that floods the
