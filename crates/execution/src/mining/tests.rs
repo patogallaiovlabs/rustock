@@ -17,7 +17,7 @@ use rustock_trie::{MemoryTrieStore, TrieNode, TrieStore};
 use std::sync::Arc;
 
 use super::*;
-use crate::hardfork::RskHardforkConfig;
+use crate::hardfork::{RskHardforkConfig, RskNetworkUpgrade};
 use crate::processor::BlockProcessor;
 
 // ── fixtures ──────────────────────────────────────────────────────────
@@ -122,10 +122,21 @@ fn fixture(height: u64) -> MiningFixture {
     fixture_with(height, test_chain_config(), U256::from(2))
 }
 
+/// A chain that reaches papyrus200 (and with it RSKIPUMM) at `papyrus200`:
+/// wasabi100 from genesis, every later rung from there. The header fields
+/// follow the hardfork ladder, not `ChainConfig::activation_heights`.
 fn fixture_with_papyrus_at(papyrus200: u64, height: u64) -> MiningFixture {
-    let mut config = (*test_chain_config()).clone();
-    config.activation_heights.papyrus200 = papyrus200;
-    fixture_with(height, Arc::new(config), U256::from(2))
+    let forks = RskHardforkConfig::all_active(33)
+        .with_hardfork(RskNetworkUpgrade::Vetiver900, Some(papyrus200))
+        .with_hardfork(RskNetworkUpgrade::Wasabi100, Some(0));
+    fixture_on_forks(
+        height,
+        test_chain_config(),
+        U256::from(2),
+        Arc::new(MemoryTrieStore::new()),
+        1,
+        forks,
+    )
 }
 
 fn fixture_with_wasabi_at(wasabi100: u64, height: u64) -> MiningFixture {
@@ -197,6 +208,18 @@ fn fixture_on(
     trie_store: Arc<dyn TrieStore>,
     flush_every: u64,
 ) -> MiningFixture {
+    let forks = RskHardforkConfig::all_active(33);
+    fixture_on_forks(height, chain_config, parent_difficulty, trie_store, flush_every, forks)
+}
+
+fn fixture_on_forks(
+    height: u64,
+    chain_config: Arc<ChainConfig>,
+    parent_difficulty: U256,
+    trie_store: Arc<dyn TrieStore>,
+    flush_every: u64,
+    hardfork_cfg: RskHardforkConfig,
+) -> MiningFixture {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(BlockStore::open(dir.path()).unwrap());
     let empty_root = TrieNode::empty().compute_hash(trie_store.as_ref());
@@ -220,7 +243,6 @@ fn fixture_on(
     store.set_head(parent_hash).unwrap();
     store.set_exec_head(parent_hash, empty_root).unwrap();
 
-    let hardfork_cfg = RskHardforkConfig::all_active(33);
     let builder = BlockTemplateBuilder::new(
         Arc::new(BlockProcessor::new(hardfork_cfg.clone(), store.clone())),
         trie_store.clone(),
@@ -595,10 +617,17 @@ fn filling_the_mining_fields_does_not_move_the_merged_mining_hash() {
 /// height differently from its peers produces blocks nobody accepts.
 #[test]
 fn umm_root_appears_once_papyrus_is_active() {
-    let fx = fixture(20);
+    // The template is for #21, one past the fixture height.
+    let fx = fixture_with_papyrus_at(22, 20);
     assert!(fx.build().unwrap().block.header.umm_root.is_none());
 
     let fx = fixture_with_papyrus_at(0, 20);
+    assert_eq!(fx.build().unwrap().block.header.umm_root, Some(Bytes::new()));
+
+    // Whatever ChainConfig says: the fixture's schedules papyrus200 never,
+    // as the regtest one does, and the hardfork ladder has it at genesis.
+    let fx = fixture(20);
+    assert_eq!(fx.chain_config.activation_heights.papyrus200, u64::MAX);
     assert_eq!(fx.build().unwrap().block.header.umm_root, Some(Bytes::new()));
 }
 
