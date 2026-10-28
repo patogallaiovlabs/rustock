@@ -381,7 +381,11 @@ impl Header {
         //   0-2     → partial (pre-orchid blocks without full mining data)
         let remaining_items = count_rlp_items(body);
 
-        if remaining_items >= 4 {
+        // A versioned header without an ummRoot has the version byte first
+        // instead: a bare 0x01 or 0x02, which an ummRoot (empty or 32 bytes)
+        // never is. Every real network activates papyrus200 long before
+        // RSKIP-351, so this only arises on a chain built without it.
+        if remaining_items >= 4 && !matches!(body.first(), Some(1 | 2)) {
             header.umm_root = Some(Bytes::decode(&mut body)?);
         }
 

@@ -251,15 +251,33 @@ impl BlockTemplateBuilder {
         // and the receipts have to be rebuilt regardless: `cumulativeGasUsed`
         // restarts at each sublist.
         let partitioned = self.partition(number, gas_limit, &transactions, &header, &state_root)?;
+        // rskj emits the edges on every header from RSKIP-144 on, empty when
+        // the block has no sublists, and never before it.
+        let mut edges = self.hardfork_cfg.has_rskip144(number).then(Vec::new);
         if let Some(partitioned) = partitioned {
             transactions = partitioned.transactions;
             header.transactions_root = ordered_tx_trie_root(&transactions, rskip126);
+            edges = Some(partitioned.edges);
+        }
+        // The header version is the chain's, not the partition's: rskj's
+        // BlockHeaderBuilder builds a V2 header from RSKIP-535 on and a V1
+        // one from RSKIP-351 on, with or without sublists (regtest activates
+        // both at genesis with RSKIP-144 off). A version-0 header on such a
+        // chain is one rskj cannot decode: it reads the version byte where
+        // the merged-mining header would be. The V2 base event is empty, not
+        // absent, when the block carries none.
+        let version = if self.hardfork_cfg.has_rskip535(number) {
+            2
+        } else if self.hardfork_cfg.has_rskip351(number) {
+            1
+        } else {
+            0
+        };
+        if version > 0 {
             header.version_fields = Some(rustock_core::types::header::HeaderVersionFields {
-                // RSKIP-351 travels with RSKIP-144; the extension is what
-                // carries the edges.
-                version: 1,
-                edges: Some(partitioned.edges),
-                base_event: None,
+                version,
+                edges,
+                base_event: (version == 2).then(Bytes::new),
             });
         }
 

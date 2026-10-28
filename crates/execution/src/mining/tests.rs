@@ -483,6 +483,41 @@ fn a_template_validates_against_the_processing_path() {
         .expect("a freshly built template must satisfy every root it filled in");
 }
 
+/// On a chain with RSKIP-535 active and no sublists (regtest, as rskj ships
+/// it: rskip351 and rskip535 at genesis, rskip144 off), the template carries
+/// a version-2 header with an empty base event and no edges, as rskj's
+/// BlockHeaderBuilder would build it. A version-0 header there is one rskj
+/// cannot decode, so the block would be rejected by every rskj peer even
+/// though this node validates it. The wire encoding must also round-trip to
+/// the same hash, since the versioned header is hashed in its compressed form.
+#[test]
+fn a_template_carries_the_header_version_the_chain_activates() {
+    let fx = fixture(20);
+    let template = fx.build().unwrap();
+    let header = &template.block.header;
+
+    let version = header.version_fields.as_ref().expect("a versioned header");
+    assert_eq!(version.version, 2);
+    assert_eq!(version.edges, None, "no sublists without RSKIP-144");
+    assert_eq!(version.base_event.as_ref().map(|b| b.is_empty()), Some(true), "empty, not absent");
+
+    // The wire form a peer sees is the sealed one; the decoder tells the
+    // trailing fields apart by position after the three merged-mining ones.
+    let mut sealed = header.clone();
+    sealed.bitcoin_merged_mining_header = Some(Bytes::from(vec![0u8; 80]));
+    sealed.bitcoin_merged_mining_merkle_proof = Some(Bytes::new());
+    sealed.bitcoin_merged_mining_coinbase_transaction = Some(Bytes::new());
+    sealed.cached_hash = None;
+    let encoded = alloy_rlp::encode(&sealed);
+    let decoded = rustock_core::Header::decode_with_activations(
+        &mut encoded.as_slice(),
+        &fx.chain_config.activation_heights,
+    )
+    .expect("the wire form decodes");
+    assert_eq!(decoded.version_fields, sealed.version_fields);
+    assert_eq!(decoded.hash(), sealed.hash());
+}
+
 /// A template without the REMASC transaction executes to a different state
 /// root. Worth pinning because the failure gives no hint of its cause: the
 /// executor does not append REMASC, so the block simply computes different
@@ -1529,7 +1564,7 @@ mod partitioned_templates {
             .build(std::slice::from_ref(&parent), Vec::new(), &pool)
             .expect("the template builds");
         assert!(
-            template.block.header.version_fields.is_none(),
+            template.block.header.version_fields.as_ref().and_then(|v| v.edges.as_ref()).is_none(),
             "RSKIP-144 is not scheduled, so the header carries no extension"
         );
         assert_eq!(
