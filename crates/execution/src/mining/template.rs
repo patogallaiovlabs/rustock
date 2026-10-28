@@ -201,12 +201,12 @@ impl BlockTemplateBuilder {
         // rskj sets ummRoot to the empty byte array from papyrus200 on (the
         // UMM contracts were never deployed, so it is never non-empty). Its
         // mere presence changes both the block hash and the merged-mining
-        // hash, so a header built without it is rejected by every peer.
-        let umm_root = if number >= self.chain_config.activation_heights.papyrus200 {
-            Some(Bytes::new())
-        } else {
-            None
-        };
+        // hash, so a header built without it is rejected by every peer. The
+        // hardfork config decides, as it does for every other header field:
+        // ChainConfig schedules papyrus200 never on regtest, where rskj
+        // activates it at genesis, and a regtest block mined without the
+        // field is one rskj cannot decode.
+        let umm_root = self.hardfork_cfg.has_rskipumm(number).then(Bytes::new);
 
         #[allow(unused_mut)]
         let mut header = Header {
