@@ -441,6 +441,16 @@ impl RskHardforkConfig {
         self.active_upgrade(block_number) >= RskNetworkUpgrade::Papyrus200
     }
 
+    /// RSKIPUMM (papyrus200): the header carries `ummRoot`, empty on every
+    /// network (the UMM contracts were never deployed). rskj reads the rule
+    /// at papyrus200 on every chain, regtest included (`regtest.conf`:
+    /// `papyrus200 = 0`), so a miner decides its presence here, not from
+    /// `ChainConfig::activation_heights`, which schedules papyrus200 never
+    /// on regtest.
+    pub fn has_rskipumm(&self, block_number: u64) -> bool {
+        self.active_upgrade(block_number) >= RskNetworkUpgrade::Papyrus200
+    }
+
     /// RSKIP150 (twoToThree, mainnet 2_018_000): a precompile's return value
     /// is written to the caller's memory bounded by the CALL's outSize.
     /// Before it, rskj `Program.memorySave` writes the FULL output at
