@@ -1186,7 +1186,7 @@ struct Args {
     /// rskj's default too. A load generator that signs bursts per account
     /// (rsk-perf-lab's k6 suite runs rskj with 500) needs more, or its
     /// later nonces are refused while the earlier ones wait for a block.
-    #[arg(long, default_value_t = 16)]
+    #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u64).range(1..))]
     account_slots: u64,
 
     /// Rate-limit accounts that broadcast transactions consuming large amounts
@@ -2428,13 +2428,21 @@ async fn run(local_offset: Option<time::UtcOffset>) -> Result<()> {
         info!("Sender cache disabled (--sigcache=false); every sender is recovered");
     }
 
+    // The checks that read the chain's activations and constants, as rskj's
+    // TxPendingValidator does: the RSKIP252 per-transaction price cap, the
+    // sublist gas limit under RSKIP144, the free Bridge transactions.
+    let (hardfork_cfg_for_pool, _) = hardfork_config(&config)?;
     let mut pool_builder = rustock_sync::TransactionPool::new(
         pool_config,
         config.chain_id.into(),
         store.clone(),
         trie_store_for_pool.clone(),
     )
-    .with_gas_price_tracker(gas_price_tracker.clone());
+    .with_gas_price_tracker(gas_price_tracker.clone())
+    .with_chain_rules(rustock_sync::txpool::ChainRules::for_chain(
+        hardfork_cfg_for_pool,
+        config.min_sequential_set_gas_limit,
+    ));
     if let Some(cache) = &sender_cache {
         pool_builder = pool_builder.with_sender_cache(cache.clone());
     }
@@ -4905,6 +4913,15 @@ mod log_timezone_tests {
         // And the default is still UTC when the flag is absent.
         let args = super::Args::try_parse_from(["rustock-cli"]).unwrap();
         assert_eq!(args.log_timezone, "utc");
+    }
+
+    /// rskj `TxValidatorNonceRangeValidatorTest.illegalAccountSlotsValue_Zero`,
+    /// at the flag: zero slots is refused before the node starts.
+    #[test]
+    fn account_slots_of_zero_are_refused() {
+        use clap::Parser;
+        assert!(super::Args::try_parse_from(["rustock-cli", "--account-slots", "0"]).is_err());
+        assert!(super::Args::try_parse_from(["rustock-cli", "--account-slots", "1"]).is_ok());
     }
 
     #[test]
