@@ -29,7 +29,7 @@ pub mod timed;
 
 pub use server::{
     ChainAccess, CommitOutcome, ImportResult, MinerServer, MinerWork, StoreChainAccess, SubmitError,
-    SubmittedBlockInfo, cumulative_difficulty, extract_merged_mining_hash,
+    SubmittedBlockInfo, SyncGate, cumulative_difficulty, extract_merged_mining_hash,
 };
 pub use uncles::{UNCLE_GENERATION_LIMIT, UNCLE_LIST_LIMIT, select_uncles};
 pub use timed::{Pow, TimedMiner, TimedSchedule};
