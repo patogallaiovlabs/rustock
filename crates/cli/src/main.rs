@@ -5198,7 +5198,7 @@ mod genesis_tests {
         assert_eq!(plain.activation_heights.orchid, mainnet.activation_heights.orchid);
         assert_eq!(plain.activation_heights.rskip97, Some(729_000));
         assert_eq!(plain.activation_heights.rskip144, None);
-        assert_eq!((plain.min_gas_limit, plain.max_gas_limit), (5000, 1_000_000_000));
+        assert_eq!((plain.min_gas_limit, plain.max_gas_limit), (3_000_000, 1_000_000_000));
         assert!(!plain.skip_pow_validation);
         assert!(plain.hardfork_overrides.is_empty());
         let (ladder, unmodelled) = hardfork_config(&plain).unwrap();
