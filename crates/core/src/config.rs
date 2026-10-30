@@ -33,6 +33,10 @@ pub struct ActivationHeights {
     pub iris300: u64,
     /// Fingerroot500 hardfork – enables RSKIP252 (transaction gas price cap).
     pub fingerroot500: u64,
+    /// Hop400 hardfork – enables RSKIP297, which widens the RSKIP179
+    /// Bitcoin-to-RSK timestamp window on testnet (5 minutes to 2 hours).
+    /// Read only on testnet; mainnet keeps 5 minutes at every height.
+    pub hop400: u64,
     /// Height at which RSKIP97 -- "no 10-minute difficulty drop" -- activates,
     /// or `None` where it never does.
     ///
@@ -76,7 +80,7 @@ impl ActivationHeights {
 
     /// Set the height this struct carries for an rskj upgrade name, for the
     /// names it carries: `orchid`, `wasabi100`, `papyrus200`, `iris300`,
-    /// `fingerroot500`, and `reed810`, which is RSKIP-144's height. `None`
+    /// `fingerroot500`, `hop400`, and `reed810`, which is RSKIP-144's height. `None`
     /// is rskj's `-1`. Any other name is the execution ladder's to judge and
     /// is left alone here.
     pub fn set_rskj_hardfork(&mut self, name: &str, height: Option<u64>) {
@@ -87,6 +91,7 @@ impl ActivationHeights {
             "papyrus200" => self.papyrus200 = height.unwrap_or(never),
             "iris300" => self.iris300 = height.unwrap_or(never),
             "fingerroot500" => self.fingerroot500 = height.unwrap_or(never),
+            "hop400" => self.hop400 = height.unwrap_or(never),
             "reed810" => self.rskip144 = height,
             _ => {}
         }
@@ -99,6 +104,7 @@ impl ActivationHeights {
             papyrus200: 2_392_700,
             iris300: 3_614_800,
             fingerroot500: 5_468_000,
+            hop400: 4_598_500,
             // reference.conf: `rskip97 = orchid`, not overridden by main.conf.
             rskip97: Some(729_000),
             // main.conf: reed810 = -1.
@@ -115,6 +121,7 @@ impl ActivationHeights {
             papyrus200: 863_000,
             iris300: 2_060_500,
             fingerroot500: 4_015_800,
+            hop400: 3_103_000,
             // testnet.conf: `rskip97 = -1  # disable orchid difficulty drop`.
             rskip97: None,
             // testnet.conf: reed810.
@@ -129,6 +136,7 @@ impl ActivationHeights {
             papyrus200: u64::MAX,
             iris300: 0,
             fingerroot500: 0,
+            hop400: 0,
             // regtest.conf: `rskip97 = -1`, same as testnet.
             rskip97: None,
             // regtest.conf: `rskip144 = -1`; rustock's regtest ladder does
