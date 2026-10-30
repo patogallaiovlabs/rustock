@@ -3522,27 +3522,61 @@ async fn test_debug_account_transaction_quota_rejects_a_bad_address() {
 
 // ========== eth_gasPrice ==========
 
-struct FixedGasPrice(u64);
+/// A tracker with a fixed answer, and a fixed opinion on the fee market.
+struct FixedGasPrice {
+    price: u64,
+    fee_market_working: bool,
+}
 impl crate::server::GasPriceSource for FixedGasPrice {
     fn gas_price(&self) -> U256 {
-        U256::from(self.0)
+        U256::from(self.price)
+    }
+    fn is_fee_market_working(&self) -> bool {
+        self.fee_market_working
     }
 }
 
-/// rskj answers with `GasPriceTracker.getGasPrice()` -- a percentile over
-/// recent transactions, floored at the block minimum times 1.1 -- not with the
-/// block's `minimumGasPrice`, which is the floor for *validity* rather than
-/// the price to pay for inclusion. A wallet trusting the floor during
-/// congestion underpays and waits.
+/// rskj `EthereumImplTest.getGasPrice_returns_trackerValue_when_feeMarketWorking_is_true`:
+/// with the fee market working, the answer is `GasPriceTracker.getGasPrice()`
+/// -- a percentile over recent transactions, floored at the block minimum
+/// times 1.1 -- not the block's `minimumGasPrice`, which is the floor for
+/// *validity* rather than the price to pay for inclusion. A wallet trusting
+/// the floor during congestion underpays and waits.
 #[tokio::test]
 async fn test_eth_gas_price_uses_the_tracker() {
     let (mut state, _tmp) = setup_state();
     // The head's minimum is 59,240,000 (see `test_header`); the tracker's
     // answer must win.
-    state.gas_price = Some(Arc::new(FixedGasPrice(123_456_789)));
+    state.gas_price = Some(Arc::new(FixedGasPrice { price: 123_456_789, fee_market_working: true }));
 
     let r = dispatch_for_test(&state, make_request("eth_gasPrice", json!([]))).await;
     assert_eq!(r.result.unwrap(), json!("0x75bcd15"));
+}
+
+/// rskj `EthereumImplTest.getGasPrice_returns_correctedBestBlockValue_when_feeMarketWorking_is_false`:
+/// with the fee market not working, the percentile is ignored and the
+/// answer is the head's minimum times `rpc.minGasPriceMultiplier` (1.1):
+/// 59,240,000 becomes 65,164,000, whatever the tracker remembers.
+#[tokio::test]
+async fn test_eth_gas_price_returns_corrected_best_block_value_when_fee_market_is_not_working() {
+    let (mut state, _tmp) = setup_state();
+    state.gas_price = Some(Arc::new(FixedGasPrice { price: 123_456_789, fee_market_working: false }));
+
+    let r = dispatch_for_test(&state, make_request("eth_gasPrice", json!([]))).await;
+    assert_eq!(r.result.unwrap(), json!(crate::helpers::to_hex_u256(&U256::from(65_164_000u64))));
+}
+
+/// The arithmetic rskj does in `EthereumImpl.getGasPrice`: a double
+/// product, truncated. A chain whose minimum has walked down to 587 wei
+/// answers 645, which is what the reference node answered on the same chain
+/// while this one answered the percentile, 26 million.
+#[test]
+fn corrected_minimum_gas_price_truncates_like_rskj() {
+    use crate::eth::corrected_minimum_gas_price;
+    assert_eq!(corrected_minimum_gas_price(U256::from(587)), U256::from(645));
+    assert_eq!(corrected_minimum_gas_price(U256::from(10)), U256::from(11));
+    assert_eq!(corrected_minimum_gas_price(U256::ZERO), U256::ZERO);
+    assert_eq!(corrected_minimum_gas_price(U256::from(59_240_000)), U256::from(65_164_000));
 }
 
 /// Without a tracker -- a node built without sync -- the head's minimum is the

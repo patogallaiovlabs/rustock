@@ -32,6 +32,10 @@ pub trait TxSubmitter: Send + Sync {
 pub trait GasPriceSource: Send + Sync {
     /// rskj `GasPriceTracker.getGasPrice()`.
     fn gas_price(&self) -> alloy_primitives::U256;
+    /// rskj `GasPriceTracker.isFeeMarketWorking()`: the last 50 blocks are
+    /// at least 90% full on average. `eth_gasPrice` answers with
+    /// [`Self::gas_price`] only while this holds.
+    fn is_fee_market_working(&self) -> bool;
 }
 
 /// Trait for reading from the transaction pool without depending on the sync crate.

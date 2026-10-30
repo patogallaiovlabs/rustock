@@ -76,19 +76,54 @@ pub async fn eth_syncing(
 /// *valid*. During congestion the two diverge, and a wallet trusting the floor
 /// underpays and waits.
 ///
-/// rskj answers with `GasPriceTracker.getGasPrice()`: the 25th percentile of
+/// rskj `EthereumImpl.getGasPrice` answers in two regimes. While the fee
+/// market is working -- the last 50 blocks at least 90% full on average --
+/// it answers with `GasPriceTracker.getGasPrice()`: the 25th percentile of
 /// the last 512 transactions' gas prices, floored at the best block's minimum
-/// times 1.1. Until the node has seen 512 transactions the tracker has no
-/// percentile and falls back to the last block's minimum -- the old answer,
-/// now as a documented fallback rather than the whole implementation.
+/// times 1.1. Otherwise the percentile says nothing about what the next block
+/// needs (a chain with spare room mines anything above its minimum), and it
+/// answers with the best block's `minimumGasPrice` times
+/// `rpc.minGasPriceMultiplier` (1.1 by default).
+///
+/// The gate matters more than it looks. The tracker's percentile is a memory
+/// of what was paid, and on a chain whose minimum has walked down far below
+/// that memory the percentile can exceed the RSKIP252 cap of 100 times the
+/// minimum: a wallet paying it builds a transaction no valid block can carry.
+///
+/// Without a tracker -- a node built without sync -- the head's minimum is
+/// the documented fallback.
 pub fn eth_gas_price(id: Value, state: &crate::server::RpcState) -> JsonRpcResponse {
+    let head = head_header(&state.store);
     if let Some(tracker) = &state.gas_price {
-        return JsonRpcResponse::success(id, json!(to_hex_u256(&alloy_primitives::U256::from(tracker.gas_price()))));
+        let price = match &head {
+            Some(h) if !tracker.is_fee_market_working() => {
+                corrected_minimum_gas_price(h.minimum_gas_price)
+            }
+            _ => tracker.gas_price(),
+        };
+        return JsonRpcResponse::success(id, json!(to_hex_u256(&price)));
     }
-    let price = head_header(&state.store)
+    let price = head
         .map(|h| to_hex_u256(&h.minimum_gas_price))
         .unwrap_or_else(|| "0x0".to_string());
     JsonRpcResponse::success(id, json!(price))
+}
+
+/// rskj `rpc.minGasPriceMultiplier`, default 1.1: what `eth_gasPrice`
+/// multiplies the best block's minimum by when the fee market is not working.
+pub const MIN_GAS_PRICE_MULTIPLIER: f64 = 1.1;
+
+/// rskj `EthereumImpl.getGasPrice`'s fallback arithmetic, kept in floating
+/// point as rskj keeps it: `minimum.doubleValue() * multiplier`, then
+/// `BigDecimal.valueOf(..).toBigInteger()`, which truncates. 587 wei answers
+/// 645, not 646. Values past `u128` are beyond any minimum gas price a chain
+/// can carry; they fall back to integer arithmetic rather than lose bits.
+pub fn corrected_minimum_gas_price(minimum: alloy_primitives::U256) -> alloy_primitives::U256 {
+    use alloy_primitives::U256;
+    match u128::try_from(minimum) {
+        Ok(min) => U256::from((min as f64 * MIN_GAS_PRICE_MULTIPLIER) as u128),
+        Err(_) => minimum.saturating_mul(U256::from(11)) / U256::from(10),
+    }
 }
 
 pub fn eth_mining(id: Value) -> JsonRpcResponse {
